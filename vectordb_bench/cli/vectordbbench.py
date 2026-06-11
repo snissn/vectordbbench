@@ -39,7 +39,12 @@ from ..backend.clients.seekdb.cli import SeekDBHNSW
 from ..backend.clients.tencent_elasticsearch.cli import TencentElasticsearch
 from ..backend.clients.test.cli import Test
 from ..backend.clients.tidb.cli import TiDB
-from ..backend.clients.treedb.cli import TreeDBHNSW
+from ..backend.clients.treedb.cli import (
+    TreeDBColumnGraphExact,
+    TreeDBHNSW,
+    TreeDBRaBitQ1BitExperimental,
+    TreeDBScalarU8Rerank,
+)
 from ..backend.clients.turbopuffer.cli import TurboPuffer, TurboPufferUnpin
 from ..backend.clients.vectorchord.cli import VectorChordGraph, VectorChordRQ
 from ..backend.clients.vespa.cli import Vespa
@@ -100,6 +105,9 @@ cli.add_command(PolarDBHNSWPQ)
 cli.add_command(PolarDBHNSWSQ)
 cli.add_command(SeekDBHNSW)
 cli.add_command(TreeDBHNSW)
+cli.add_command(TreeDBColumnGraphExact)
+cli.add_command(TreeDBScalarU8Rerank)
+cli.add_command(TreeDBRaBitQ1BitExperimental)
 
 
 if __name__ == "__main__":
