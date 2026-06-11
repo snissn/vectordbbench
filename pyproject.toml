@@ -83,7 +83,7 @@ endee           = [ "endee==0.1.10" ]
 lindorm         = [ "opensearch-py" ]
 seekdb          = [ "mysql-connector-python" ]
 pinot           = [ "requests" ]
-treedb          = [ "treedb-client @ git+https://github.com/snissn/gomap.git@6fad12d4488fb01bda1b9ee7f55da0c8bdb2ebe2#subdirectory=clients/python/treedb_client" ]
+treedb          = [ "treedb-client @ git+https://github.com/snissn/gomap.git@bd50fa2b7c731bc8c4fd91eaa542fa7fb71aa607#subdirectory=clients/python/treedb_client" ]
 
 [project.urls]
 Repository  = "https://github.com/zilliztech/VectorDBBench"
