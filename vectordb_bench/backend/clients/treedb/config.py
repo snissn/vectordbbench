@@ -37,6 +37,8 @@ class TreeDBHNSWConfig(BaseModel, DBCaseConfig):
     quantized_codec: str = ""
     quantized_index_name: str = ""
     quantized_rerank_candidates: int = 0
+    require_vector_index_guards: bool = True
+    experimental: bool = False
 
     def index_param(self) -> dict:
         params: dict = {
@@ -62,7 +64,49 @@ class TreeDBHNSWConfig(BaseModel, DBCaseConfig):
             "ef_search": self.ef_search,
             "quantized_index_name": self.quantized_index_name,
             "quantized_rerank_candidates": self.quantized_rerank_candidates,
+            "require_vector_index_guards": self.require_vector_index_guards,
+            "experimental": self.experimental,
         }
+
+
+class TreeDBColumnGraphExactConfig(TreeDBHNSWConfig):
+    """Named TreeDB no-document exact FP32 column_graph row."""
+
+    use_vector_index: bool = True
+    query_mode: str = "exact"
+    quantized_codec: str = ""
+    quantized_index_name: str = ""
+    quantized_rerank_candidates: int = 0
+
+
+class TreeDBScalarU8RerankConfig(TreeDBHNSWConfig):
+    """Named TreeDB scalar_u8 + exact-rerank column_graph row.
+
+    The default rerank shortlist is 32 to match TreeDB's current rerank32
+    evidence lane unless a benchmark explicitly overrides it.
+    """
+
+    use_vector_index: bool = True
+    query_mode: str = "quantized_rerank"
+    quantized_codec: str = "scalar_u8"
+    quantized_index_name: str = "embedding.scalar_u8.fast"
+    quantized_rerank_candidates: int = 32
+
+
+class TreeDBRaBitQ1BitExperimentalConfig(TreeDBHNSWConfig):
+    """Optional experimental RaBitQ v1 row.
+
+    This preserves the existing `rabitq_1bit` codec identity and keeps the row
+    explicitly labeled experimental so it cannot be confused with scalar_u8's
+    exact-like rerank evidence.
+    """
+
+    use_vector_index: bool = True
+    query_mode: str = "quantized_only"
+    quantized_codec: str = "rabitq_1bit"
+    quantized_index_name: str = "embedding.rabitq_1bit.experimental"
+    quantized_rerank_candidates: int = 0
+    experimental: bool = True
 
 
 _treedb_case_config = {
