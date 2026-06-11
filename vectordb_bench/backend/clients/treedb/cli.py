@@ -76,7 +76,7 @@ class TreeDBTypedDict(TreeDBBaseTypedDict):
         str,
         click.option(
             "--quantized-codec",
-            type=click.Choice(["", "scalar_u8", "rabitq_1bit", "brq_1bit"]),
+            type=click.Choice(["", "scalar_u8", "rabitq_1bit"]),
             default="",
             show_default=True,
         ),
