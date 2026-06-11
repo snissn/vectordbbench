@@ -104,7 +104,11 @@ class TreeDB(VectorDB):
                 Document(id=str(meta), embedding=[float(value) for value in embedding])
                 for meta, embedding in zip(metadata, embeddings, strict=False)
             ]
-            response = self.client.upsert_documents(self.index_name, documents)
+            response = self.client.upsert_documents(
+                self.index_name,
+                documents,
+                defer_vector_index_rebuild=bool(self._search_param.get("use_vector_index")),
+            )
             return response.upserted, None
         except Exception as exc:  # noqa: BLE001
             log.warning("Failed to insert embeddings into TreeDB index %s: %s", self.index_name, exc)

@@ -147,6 +147,47 @@ def test_treedb_vector_index_init_passes_options(monkeypatch: MonkeyPatch) -> No
     ]
 
 
+def test_treedb_vector_index_inserts_defer_rebuild_until_optimize(monkeypatch: MonkeyPatch) -> None:
+    calls = []
+
+    class FakeDocument:
+        def __init__(self, id, embedding):
+            self.id = id
+            self.embedding = embedding
+
+    class FakeClient:
+        def __init__(self, base_url, timeout=30.0):
+            self.base_url = base_url
+            self.timeout = timeout
+
+        def create_index(self, *args, **kwargs):
+            pass
+
+        def upsert_documents(self, index_name, documents, *, defer_vector_index_rebuild=False):
+            calls.append((index_name, documents, defer_vector_index_rebuild))
+            return SimpleNamespace(upserted=len(documents))
+
+    fake_module = ModuleType("treedb_client")
+    fake_module.Document = FakeDocument
+    fake_module.TreeDBClient = FakeClient
+    monkeypatch.setitem(sys.modules, "treedb_client", fake_module)
+
+    from vectordb_bench.backend.clients.treedb.treedb import TreeDB
+
+    db = TreeDB(
+        dim=2,
+        db_config={"base_url": "http://127.0.0.1:7120", "index_name": "bench", "timeout": 5},
+        db_case_config=TreeDBColumnGraphExactConfig(),
+    )
+
+    count, err = db.insert_embeddings([[1.0, 0.0]], [7])
+
+    assert err is None
+    assert count == 1
+    assert calls[0][0] == "bench"
+    assert calls[0][2] is True
+
+
 def test_treedb_named_exact_cli_uses_vector_index_guards(monkeypatch: MonkeyPatch) -> None:
     captured = {}
 
