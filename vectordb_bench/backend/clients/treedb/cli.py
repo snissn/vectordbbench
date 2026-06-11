@@ -19,7 +19,7 @@ class TreeDBTypedDict(CommonTypedDict):
     use_vector_index: Annotated[bool, click.option("--use-vector-index/--use-dense-vector", type=bool, help="Use TreeDB no-document vector-index route instead of exact dense service route", default=False, show_default=True)]
     strategy: Annotated[str, click.option("--strategy", type=click.Choice(["native_runtime", "column_graph"]), default="column_graph", show_default=True)]
     query_mode: Annotated[str, click.option("--query-mode", type=click.Choice(["exact", "quantized_only", "quantized_rerank"]), default="exact", show_default=True)]
-    quantized_codec: Annotated[str, click.option("--quantized-codec", type=click.Choice(["", "scalar_u8", "rabitq_1bit", "brq_1bit"]), default="", show_default=True)]
+    quantized_codec: Annotated[str, click.option("--quantized-codec", type=click.Choice(["", "scalar_u8", "rabitq_1bit"]), default="", show_default=True)]
     quantized_index_name: Annotated[str, click.option("--quantized-index-name", type=str, default="", help="TreeDB quantized score-plane name")]
     quantized_rerank_candidates: Annotated[int, click.option("--quantized-rerank-candidates", type=int, default=0, help="Exact rerank shortlist for quantized_rerank; use 32 for scalar_u8 rerank32 evidence")]
 
