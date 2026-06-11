@@ -1,3 +1,6 @@
+import sys
+from types import ModuleType
+
 from click.testing import CliRunner
 from pytest import MonkeyPatch
 
@@ -74,3 +77,65 @@ def test_treedb_cli_dry_run_captures_scalar_u8_rerank(monkeypatch: MonkeyPatch) 
     assert captured["args"][2].use_vector_index is True
     assert captured["args"][2].query_mode == "quantized_rerank"
     assert captured["args"][2].quantized_rerank_candidates == 32
+
+
+def test_treedb_dense_init_omits_vector_index_options(monkeypatch: MonkeyPatch) -> None:
+    calls = []
+
+    class FakeClient:
+        def __init__(self, base_url, timeout=30.0):
+            self.base_url = base_url
+            self.timeout = timeout
+
+        def create_index(self, index_name, dimension, metric, vector_index_options=None):
+            calls.append((index_name, dimension, metric, vector_index_options))
+
+    fake_module = ModuleType("treedb_client")
+    fake_module.TreeDBClient = FakeClient
+    monkeypatch.setitem(sys.modules, "treedb_client", fake_module)
+
+    from vectordb_bench.backend.clients.treedb.treedb import TreeDB
+
+    TreeDB(
+        dim=3,
+        db_config={"base_url": "http://127.0.0.1:7120", "index_name": "bench", "timeout": 5},
+        db_case_config=TreeDBHNSWConfig(use_vector_index=False),
+    )
+
+    assert calls == [("bench", 3, "cosine", None)]
+
+
+def test_treedb_vector_index_init_passes_options(monkeypatch: MonkeyPatch) -> None:
+    calls = []
+
+    class FakeClient:
+        def __init__(self, base_url, timeout=30.0):
+            self.base_url = base_url
+            self.timeout = timeout
+
+        def create_index(self, index_name, dimension, metric, vector_index_options=None):
+            calls.append((index_name, dimension, metric, vector_index_options))
+
+    fake_module = ModuleType("treedb_client")
+    fake_module.TreeDBClient = FakeClient
+    monkeypatch.setitem(sys.modules, "treedb_client", fake_module)
+
+    from vectordb_bench.backend.clients.treedb.treedb import TreeDB
+
+    TreeDB(
+        dim=3,
+        db_config={"base_url": "http://127.0.0.1:7120", "index_name": "bench", "timeout": 5},
+        db_case_config=TreeDBHNSWConfig(
+            use_vector_index=True,
+            query_mode="quantized_rerank",
+            quantized_codec="scalar_u8",
+            quantized_index_name="embedding.scalar_u8.fast",
+            quantized_rerank_candidates=32,
+        ),
+    )
+
+    assert calls[0][0:3] == ("bench", 3, "cosine")
+    assert calls[0][3]["strategy"] == "column_graph"
+    assert calls[0][3]["quantized_indexes"] == [
+        {"name": "embedding.scalar_u8.fast", "codec": "scalar_u8", "version": 1}
+    ]

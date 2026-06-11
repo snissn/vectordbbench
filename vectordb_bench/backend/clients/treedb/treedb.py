@@ -33,7 +33,7 @@ class TreeDB(VectorDB):
         self._client = None
         self._search_param = db_case_config.search_param()
         self._metric = self._parse_metric(db_case_config.metric_type)
-        self._vector_index_options = db_case_config.index_param()
+        self._vector_index_options = db_case_config.index_param() if self._search_param.get("use_vector_index") else None
 
         # Do setup in __init__ with a short-lived client so the object remains
         # pickle-safe for VectorDBBench subprocess runners.
