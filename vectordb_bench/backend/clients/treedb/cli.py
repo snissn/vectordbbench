@@ -54,10 +54,13 @@ class TreeDBBaseTypedDict(CommonTypedDict):
         str,
         click.option(
             "--query-embedding-encoding",
-            type=click.Choice(["json", "f32_le_b64"]),
+            type=click.Choice(["json", "f32_le_b64", "f32_le"]),
             default="json",
             show_default=True,
-            help="Encode TreeDB vector-index query embeddings as JSON floats or base64 little-endian float32 bytes",
+            help=(
+                "Encode TreeDB vector-index query embeddings as JSON floats, "
+                "base64 little-endian float32 bytes, or raw little-endian float32 bytes"
+            ),
         ),
     ]
 

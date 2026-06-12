@@ -16,6 +16,7 @@ _QUANTIZED_ASSET_FAILURE_STATS = (
     "quantized_asset_stale",
     "quantized_asset_closed",
 )
+_QUERY_EMBEDDING_ENCODINGS = ("json", "f32_le_b64", "f32_le")
 
 
 class TreeDB(VectorDB):
@@ -152,12 +153,12 @@ class TreeDB(VectorDB):
         raise ValueError(msg)
 
     def _validate_config_shape(self) -> None:
-        if self.query_embedding_encoding not in ("json", "f32_le_b64"):
+        if self.query_embedding_encoding not in _QUERY_EMBEDDING_ENCODINGS:
             msg = f"TreeDB query_embedding_encoding={self.query_embedding_encoding!r} is not supported"
             raise ValueError(msg)
         if not self._search_param.get("use_vector_index"):
             if self.query_embedding_encoding != "json":
-                msg = "TreeDB f32_le_b64 query embedding encoding is supported only for the vector-index route"
+                msg = "TreeDB typed/binary query embedding encodings are supported only for the vector-index route"
                 raise ValueError(msg)
             return
         if self._metric != "cosine":
@@ -166,6 +167,9 @@ class TreeDB(VectorDB):
         mode = self._search_param.get("query_mode") or "exact"
         quantized_name = self._search_param.get("quantized_index_name") or ""
         rerank_candidates = int(self._search_param.get("quantized_rerank_candidates") or 0)
+        if self.query_embedding_encoding == "f32_le" and mode != "exact":
+            msg = "TreeDB f32_le query embedding encoding is supported only for exact vector-index search"
+            raise ValueError(msg)
         if mode == "exact":
             if quantized_name or rerank_candidates:
                 msg = "TreeDB exact column_graph row must not set quantized_index_name or quantized_rerank_candidates"

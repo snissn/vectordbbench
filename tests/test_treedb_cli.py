@@ -224,6 +224,8 @@ def test_treedb_named_exact_cli_uses_vector_index_guards(monkeypatch: MonkeyPatc
             "128",
             "--ef-search",
             "64",
+            "--query-embedding-encoding",
+            "f32_le",
             "--skip-load",
             "--skip-search-serial",
             "--skip-search-concurrent",
@@ -232,6 +234,7 @@ def test_treedb_named_exact_cli_uses_vector_index_guards(monkeypatch: MonkeyPatc
     )
 
     assert result.exit_code == 0, result.output
+    assert captured["args"][1].query_embedding_encoding == "f32_le"
     case = captured["args"][2]
     assert case.use_vector_index is True
     assert case.query_mode == "exact"
@@ -354,15 +357,16 @@ def test_treedb_exact_vector_index_response_guard_allows_exact_route() -> None:
     assert db.search_embedding([1.0, 0.0], 1) == [7]
 
 
-def test_treedb_vector_index_search_passes_query_embedding_encoding() -> None:
+@pytest.mark.parametrize("encoding", ["f32_le_b64", "f32_le"])
+def test_treedb_vector_index_search_passes_query_embedding_encoding(encoding: str) -> None:
     db = _tree_db_for_response(
         {"use_vector_index": True, "query_mode": "exact", "ef_search": 64, "require_vector_index_guards": True},
         _result_response(),
     )
-    db.query_embedding_encoding = "f32_le_b64"
+    db.query_embedding_encoding = encoding
 
     assert db.search_embedding([1.0, 0.0], 1) == [7]
-    assert db._client.calls[0][1]["query_embedding_encoding"] == "f32_le_b64"
+    assert db._client.calls[0][1]["query_embedding_encoding"] == encoding
 
 
 def test_treedb_exact_vector_index_response_guard_rejects_quantized_activity() -> None:
@@ -479,9 +483,20 @@ def test_treedb_config_shape_rejects_quantized_rerank_without_index() -> None:
     with pytest.raises(ValueError, match="requires quantized_index_name"):
         db._validate_config_shape()
 
-    db.query_embedding_encoding = "f32_le_b64"
     db._search_param = {"use_vector_index": False}
-    with pytest.raises(ValueError, match="supported only for the vector-index route"):
+    for encoding in ("f32_le_b64", "f32_le"):
+        db.query_embedding_encoding = encoding
+        with pytest.raises(ValueError, match="supported only for the vector-index route"):
+            db._validate_config_shape()
+
+    db.query_embedding_encoding = "f32_le"
+    db._search_param = {
+        "use_vector_index": True,
+        "query_mode": "quantized_rerank",
+        "quantized_index_name": "embedding.scalar_u8.fast",
+        "quantized_rerank_candidates": 32,
+    }
+    with pytest.raises(ValueError, match="exact vector-index search"):
         db._validate_config_shape()
 
 
