@@ -16,8 +16,19 @@ from vectordb_bench.backend.clients.treedb.config import (
 
 
 def test_treedb_config_to_dict_and_case_config_scalar_u8_rerank() -> None:
-    config = TreeDBConfig(db_label="local", base_url="http://127.0.0.1:7120", index_name="bench", timeout=5)
-    assert config.to_dict() == {"base_url": "http://127.0.0.1:7120", "index_name": "bench", "timeout": 5}
+    config = TreeDBConfig(
+        db_label="local",
+        base_url="http://127.0.0.1:7120",
+        index_name="bench",
+        timeout=5,
+        query_embedding_encoding="f32_le_b64",
+    )
+    assert config.to_dict() == {
+        "base_url": "http://127.0.0.1:7120",
+        "index_name": "bench",
+        "timeout": 5,
+        "query_embedding_encoding": "f32_le_b64",
+    }
 
     case = TreeDBHNSWConfig(
         index=IndexType.HNSW,
@@ -70,6 +81,8 @@ def test_treedb_cli_dry_run_captures_scalar_u8_rerank(monkeypatch: MonkeyPatch) 
             "embedding.scalar_u8.fast",
             "--quantized-rerank-candidates",
             "32",
+            "--query-embedding-encoding",
+            "f32_le_b64",
             "--skip-load",
             "--skip-search-serial",
             "--skip-search-concurrent",
@@ -80,6 +93,7 @@ def test_treedb_cli_dry_run_captures_scalar_u8_rerank(monkeypatch: MonkeyPatch) 
     assert result.exit_code == 0, result.output
     assert captured["args"][0] == DB.TreeDB
     assert captured["args"][1].base_url == "http://127.0.0.1:7120"
+    assert captured["args"][1].query_embedding_encoding == "f32_le_b64"
     assert captured["args"][2].use_vector_index is True
     assert captured["args"][2].query_mode == "quantized_rerank"
     assert captured["args"][2].quantized_rerank_candidates == 32
@@ -210,6 +224,8 @@ def test_treedb_named_exact_cli_uses_vector_index_guards(monkeypatch: MonkeyPatc
             "128",
             "--ef-search",
             "64",
+            "--query-embedding-encoding",
+            "f32_le",
             "--skip-load",
             "--skip-search-serial",
             "--skip-search-concurrent",
@@ -218,6 +234,7 @@ def test_treedb_named_exact_cli_uses_vector_index_guards(monkeypatch: MonkeyPatc
     )
 
     assert result.exit_code == 0, result.output
+    assert captured["args"][1].query_embedding_encoding == "f32_le"
     case = captured["args"][2]
     assert case.use_vector_index is True
     assert case.query_mode == "exact"
@@ -300,8 +317,10 @@ def test_treedb_named_rabitq_cli_is_experimental(monkeypatch: MonkeyPatch) -> No
 class _FakeTreeDBClient:
     def __init__(self, response):
         self.response = response
+        self.calls = []
 
     def search_vector_index(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
         return self.response
 
 
@@ -311,6 +330,7 @@ def _tree_db_for_response(search_param: dict, response):
     db = object.__new__(TreeDB)
     db.index_name = "bench"
     db._client = _FakeTreeDBClient(response)
+    db.query_embedding_encoding = "json"
     db._search_param = search_param
     return db
 
@@ -335,6 +355,18 @@ def test_treedb_exact_vector_index_response_guard_allows_exact_route() -> None:
     )
 
     assert db.search_embedding([1.0, 0.0], 1) == [7]
+
+
+@pytest.mark.parametrize("encoding", ["f32_le_b64", "f32_le"])
+def test_treedb_vector_index_search_passes_query_embedding_encoding(encoding: str) -> None:
+    db = _tree_db_for_response(
+        {"use_vector_index": True, "query_mode": "exact", "ef_search": 64, "require_vector_index_guards": True},
+        _result_response(),
+    )
+    db.query_embedding_encoding = encoding
+
+    assert db.search_embedding([1.0, 0.0], 1) == [7]
+    assert db._client.calls[0][1]["query_embedding_encoding"] == encoding
 
 
 def test_treedb_exact_vector_index_response_guard_rejects_quantized_activity() -> None:
@@ -439,6 +471,7 @@ def test_treedb_config_shape_rejects_quantized_rerank_without_index() -> None:
     from vectordb_bench.backend.clients.treedb.treedb import TreeDB
 
     db = object.__new__(TreeDB)
+    db.query_embedding_encoding = "json"
     db._metric = "cosine"
     db._search_param = {
         "use_vector_index": True,
@@ -448,6 +481,22 @@ def test_treedb_config_shape_rejects_quantized_rerank_without_index() -> None:
     }
 
     with pytest.raises(ValueError, match="requires quantized_index_name"):
+        db._validate_config_shape()
+
+    db._search_param = {"use_vector_index": False}
+    for encoding in ("f32_le_b64", "f32_le"):
+        db.query_embedding_encoding = encoding
+        with pytest.raises(ValueError, match="supported only for the vector-index route"):
+            db._validate_config_shape()
+
+    db.query_embedding_encoding = "f32_le"
+    db._search_param = {
+        "use_vector_index": True,
+        "query_mode": "quantized_rerank",
+        "quantized_index_name": "embedding.scalar_u8.fast",
+        "quantized_rerank_candidates": 32,
+    }
+    with pytest.raises(ValueError, match="exact vector-index search"):
         db._validate_config_shape()
 
 
