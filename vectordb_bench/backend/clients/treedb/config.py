@@ -9,12 +9,14 @@ class TreeDBConfig(DBConfig):
     base_url: str
     index_name: str = "vector_bench_test"
     timeout: float = 30.0
+    query_embedding_encoding: str = "json"
 
     def to_dict(self) -> dict:
         return {
             "base_url": self.base_url,
             "index_name": self.index_name,
             "timeout": self.timeout,
+            "query_embedding_encoding": self.query_embedding_encoding,
         }
 
 

@@ -38,6 +38,7 @@ class TreeDB(VectorDB):
         self.index_name = db_config.get("index_name") or collection_name
         self.base_url = db_config["base_url"]
         self.timeout = db_config.get("timeout", 30.0)
+        self.query_embedding_encoding = db_config.get("query_embedding_encoding", "json")
         self._client = None
         self._search_param = db_case_config.search_param()
         self._metric = self._parse_metric(db_case_config.metric_type)
@@ -127,6 +128,7 @@ class TreeDB(VectorDB):
                 query_mode=self._search_param.get("query_mode") or None,
                 quantized_index_name=self._search_param.get("quantized_index_name") or None,
                 quantized_rerank_candidates=self._search_param.get("quantized_rerank_candidates") or None,
+                query_embedding_encoding=self.query_embedding_encoding,
             )
             if self._search_param.get("require_vector_index_guards", True):
                 self._validate_vector_index_response(result)
@@ -150,7 +152,13 @@ class TreeDB(VectorDB):
         raise ValueError(msg)
 
     def _validate_config_shape(self) -> None:
+        if self.query_embedding_encoding not in ("json", "f32_le_b64"):
+            msg = f"TreeDB query_embedding_encoding={self.query_embedding_encoding!r} is not supported"
+            raise ValueError(msg)
         if not self._search_param.get("use_vector_index"):
+            if self.query_embedding_encoding != "json":
+                msg = "TreeDB f32_le_b64 query embedding encoding is supported only for the vector-index route"
+                raise ValueError(msg)
             return
         if self._metric != "cosine":
             msg = "TreeDB vector-index benchmark route currently supports only cosine metric"

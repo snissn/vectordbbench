@@ -50,6 +50,16 @@ class TreeDBBaseTypedDict(CommonTypedDict):
             show_default=True,
         ),
     ]
+    query_embedding_encoding: Annotated[
+        str,
+        click.option(
+            "--query-embedding-encoding",
+            type=click.Choice(["json", "f32_le_b64"]),
+            default="json",
+            show_default=True,
+            help="Encode TreeDB vector-index query embeddings as JSON floats or base64 little-endian float32 bytes",
+        ),
+    ]
 
 
 class TreeDBTypedDict(TreeDBBaseTypedDict):
@@ -172,6 +182,7 @@ def _treedb_config(parameters):
         base_url=parameters["base_url"],
         index_name=parameters["index_name"],
         timeout=parameters["timeout"],
+        query_embedding_encoding=parameters["query_embedding_encoding"],
     )
 
 
