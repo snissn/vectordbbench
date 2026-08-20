@@ -1,8 +1,9 @@
 import sys
 from types import ModuleType, SimpleNamespace
+from typing import TYPE_CHECKING
 
-from click.testing import CliRunner
 import pytest
+from click.testing import CliRunner
 from pytest import MonkeyPatch
 
 from vectordb_bench.backend.clients import DB, IndexType
@@ -13,6 +14,9 @@ from vectordb_bench.backend.clients.treedb.config import (
     TreeDBHNSWConfig,
     TreeDBScalarU8RerankConfig,
 )
+
+if TYPE_CHECKING:
+    from vectordb_bench.backend.clients.treedb.treedb import TreeDB
 
 
 def test_treedb_config_to_dict_and_case_config_scalar_u8_rerank() -> None:
@@ -344,7 +348,7 @@ def test_treedb_worker_lifecycle_closes_client() -> None:
     assert db._client is None
 
 
-def _tree_db_for_response(search_param: dict, response):
+def _tree_db_for_response(search_param: dict, response) -> "TreeDB":
     from vectordb_bench.backend.clients.treedb.treedb import TreeDB
 
     db = object.__new__(TreeDB)
@@ -541,7 +545,19 @@ def test_treedb_config_shape_rejects_quantized_rerank_without_index() -> None:
     }
     db._validate_config_shape()
 
+    db.query_embedding_encoding = "json"
     db.response_format = "ids"
+    db._search_param = {"use_vector_index": False}
+    with pytest.raises(ValueError, match="compact IDs responses are supported only for the vector-index route"):
+        db._validate_config_shape()
+
+    db.response_format = "ids"
+    db._search_param = {
+        "use_vector_index": True,
+        "query_mode": "quantized_rerank",
+        "quantized_index_name": "embedding.scalar_u8.fast",
+        "quantized_rerank_candidates": 32,
+    }
     db._search_param["require_vector_index_guards"] = True
     with pytest.raises(ValueError, match="separate full-response preflight"):
         db._validate_config_shape()

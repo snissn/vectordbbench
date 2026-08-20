@@ -179,6 +179,8 @@ class TreeDB(VectorDB):
             if self.query_embedding_encoding != "json":
                 msg = "TreeDB typed/binary query embedding encodings are supported only for the vector-index route"
                 raise ValueError(msg)
+            if self.response_format == "ids":
+                raise ValueError("TreeDB compact IDs responses are supported only for the vector-index route")
             return
         if self._metric != "cosine":
             msg = "TreeDB vector-index benchmark route currently supports only cosine metric"
