@@ -40,6 +40,8 @@ class TreeDB(VectorDB):
         self.base_url = db_config["base_url"]
         self.timeout = db_config.get("timeout", 30.0)
         self.query_embedding_encoding = db_config.get("query_embedding_encoding", "json")
+        self.stats_mode = db_config.get("stats_mode", "full_diagnostics")
+        self.response_format = db_config.get("response_format", "full")
         self._client = None
         self._search_param = db_case_config.search_param()
         self._metric = self._parse_metric(db_case_config.metric_type)
@@ -51,21 +53,26 @@ class TreeDB(VectorDB):
         # Do setup in __init__ with a short-lived client so the object remains
         # pickle-safe for VectorDBBench subprocess runners.
         client = self._new_client()
-        if drop_old:
-            client.reset_index(
-                self.index_name,
-                dimension=self.dim,
-                metric=self._metric,
-                drop_old=True,
-                vector_index_options=self._vector_index_options,
-            )
-        else:
-            client.create_index(
-                self.index_name,
-                self.dim,
-                self._metric,
-                vector_index_options=self._vector_index_options,
-            )
+        try:
+            if drop_old:
+                client.reset_index(
+                    self.index_name,
+                    dimension=self.dim,
+                    metric=self._metric,
+                    drop_old=True,
+                    vector_index_options=self._vector_index_options,
+                )
+            else:
+                client.create_index(
+                    self.index_name,
+                    self.dim,
+                    self._metric,
+                    vector_index_options=self._vector_index_options,
+                )
+        finally:
+            close = getattr(client, "close", None)
+            if close is not None:
+                close()
 
     def __getstate__(self):
         state = self.__dict__.copy()
@@ -83,6 +90,9 @@ class TreeDB(VectorDB):
         try:
             yield
         finally:
+            close = getattr(self._client, "close", None)
+            if close is not None:
+                close()
             self._client = None
 
     @property
@@ -121,18 +131,21 @@ class TreeDB(VectorDB):
 
     def search_embedding(self, query: list[float], k: int = 100, **kwargs: Any) -> list[int]:
         if self._search_param.get("use_vector_index"):
-            result = self.client.search_vector_index(
-                self.index_name,
-                query,
-                k,
-                ef_search=self._search_param.get("ef_search") or None,
-                query_mode=self._search_param.get("query_mode") or None,
-                quantized_index_name=self._search_param.get("quantized_index_name") or None,
-                quantized_rerank_candidates=self._search_param.get("quantized_rerank_candidates") or None,
-                query_embedding_encoding=self.query_embedding_encoding,
-            )
+            search_options = {
+                "ef_search": self._search_param.get("ef_search") or None,
+                "query_mode": self._search_param.get("query_mode") or None,
+                "quantized_index_name": self._search_param.get("quantized_index_name") or None,
+                "quantized_rerank_candidates": self._search_param.get("quantized_rerank_candidates") or None,
+                "query_embedding_encoding": self.query_embedding_encoding,
+                "stats_mode": self.stats_mode,
+            }
+            if self.response_format == "ids":
+                search_options["response_format"] = "ids"
+            result = self.client.search_vector_index(self.index_name, query, k, **search_options)
             if self._search_param.get("require_vector_index_guards", True):
                 self._validate_vector_index_response(result)
+            if self.response_format == "ids":
+                return [int(id_value) for id_value in result.ids]
             return [int(item.id) for item in result.results]
         result = self.client.query_by_embedding(self.index_name, query, k)
         return [int(doc.id) for doc in result.documents]
@@ -156,6 +169,12 @@ class TreeDB(VectorDB):
         if self.query_embedding_encoding not in _QUERY_EMBEDDING_ENCODINGS:
             msg = f"TreeDB query_embedding_encoding={self.query_embedding_encoding!r} is not supported"
             raise ValueError(msg)
+        if self.stats_mode not in ("full_diagnostics", "production"):
+            msg = f"TreeDB stats_mode={self.stats_mode!r} is not supported"
+            raise ValueError(msg)
+        if self.response_format not in ("full", "ids"):
+            msg = f"TreeDB response_format={self.response_format!r} is not supported"
+            raise ValueError(msg)
         if not self._search_param.get("use_vector_index"):
             if self.query_embedding_encoding != "json":
                 msg = "TreeDB typed/binary query embedding encodings are supported only for the vector-index route"
@@ -167,8 +186,8 @@ class TreeDB(VectorDB):
         mode = self._search_param.get("query_mode") or "exact"
         quantized_name = self._search_param.get("quantized_index_name") or ""
         rerank_candidates = int(self._search_param.get("quantized_rerank_candidates") or 0)
-        if self.query_embedding_encoding == "f32_le" and mode != "exact":
-            msg = "TreeDB f32_le query embedding encoding is supported only for exact vector-index search"
+        if self.response_format == "ids" and self._search_param.get("require_vector_index_guards", True):
+            msg = "TreeDB compact IDs rows require --skip-vector-index-guards after a separate full-response preflight"
             raise ValueError(msg)
         if mode == "exact":
             if quantized_name or rerank_candidates:
@@ -242,9 +261,7 @@ class TreeDB(VectorDB):
             )
             raise RuntimeError(msg)
         failed_assets = {
-            name: _int_stat(stats, name)
-            for name in _QUANTIZED_ASSET_FAILURE_STATS
-            if _int_stat(stats, name) != 0
+            name: _int_stat(stats, name) for name in _QUANTIZED_ASSET_FAILURE_STATS if _int_stat(stats, name) != 0
         }
         if failed_assets:
             msg = f"TreeDB quantized score-plane reported unavailable assets: {failed_assets}"
