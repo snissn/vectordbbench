@@ -843,6 +843,10 @@ def test_treedb_live_ann_preflight_proves_insert_update_and_delete() -> None:
             results=[],
             diagnostics={"route": "exact_hnsw_search_pack_v1", "fallback_reason": "none", "live_ann": live},
         ),
+        _result_response(
+            results=[],
+            diagnostics={"route": "exact_hnsw_search_pack_v1", "fallback_reason": "none", "live_ann": live},
+        ),
     ]
     db = _tree_db_for_response(
         {"use_vector_index": True, "query_mode": "exact", "ef_search": 64, "require_vector_index_guards": True},
@@ -857,6 +861,75 @@ def test_treedb_live_ann_preflight_proves_insert_update_and_delete() -> None:
     db._client.search_vector_index = lambda *args, **kwargs: responses.pop(0)
 
     db.preflight_live_ann()
+
+
+def test_treedb_live_ann_preflight_fails_when_anchor_cleanup_is_not_visible() -> None:
+    anchor = SimpleNamespace(id="__vectordbbench_live_ann_anchor__")
+    probe = SimpleNamespace(id="__vectordbbench_live_ann_probe__")
+    live = {"enabled": True, "exact_fallbacks": 0, "full_rebuilds": 0}
+    responses = [
+        _result_response(results=[item], diagnostics={"route": "live", "live_ann": live})
+        for item in (anchor, probe, probe, anchor)
+    ]
+    responses.extend(
+        [
+            _result_response(results=[], diagnostics={"route": "live", "live_ann": live}),
+            _result_response(results=[anchor], diagnostics={"route": "live", "live_ann": live}),
+        ]
+    )
+    db = _tree_db_for_response({"use_vector_index": True, "query_mode": "exact"}, responses[0])
+    db.dim = 2
+    db.document_embedding_encoding = "f32_le_b64"
+    db.live_ann_visibility_timeout = 0
+    db.live_ann_visibility_poll_interval = 0
+    db._client.upsert_documents = lambda *args, **kwargs: SimpleNamespace(upserted=1)
+    db._client.delete_documents = lambda *args, **kwargs: SimpleNamespace(deleted=1)
+    db._client.search_vector_index = lambda *args, **kwargs: responses.pop(0)
+
+    with pytest.raises(RuntimeError, match="cleanup.*not absent"):
+        db.preflight_live_ann()
+
+
+def test_treedb_live_ann_preflight_propagates_cleanup_delete_failure() -> None:
+    anchor = SimpleNamespace(id="__vectordbbench_live_ann_anchor__")
+    probe = SimpleNamespace(id="__vectordbbench_live_ann_probe__")
+    live = {"enabled": True, "exact_fallbacks": 0, "full_rebuilds": 0}
+    responses = [
+        _result_response(results=results, diagnostics={"route": "live", "live_ann": live})
+        for results in ([anchor], [probe], [probe], [anchor], [])
+    ]
+    db = _tree_db_for_response({"use_vector_index": True, "query_mode": "exact"}, responses[0])
+    db.dim = 2
+    db.document_embedding_encoding = "f32_le_b64"
+    db.live_ann_visibility_timeout = 0
+    db.live_ann_visibility_poll_interval = 0
+    db._client.upsert_documents = lambda *args, **kwargs: SimpleNamespace(upserted=1)
+    deletes = []
+
+    def delete(*args, **kwargs):
+        deletes.append(args[1])
+        if len(deletes) == 2:
+            raise RuntimeError("cleanup delete failed")
+
+    db._client.delete_documents = delete
+    db._client.search_vector_index = lambda *args, **kwargs: responses.pop(0)
+
+    with pytest.raises(RuntimeError, match="cleanup.*cleanup delete failed"):
+        db.preflight_live_ann()
+
+
+def test_treedb_live_ann_preflight_preserves_primary_failure_over_cleanup_failure() -> None:
+    db = _tree_db_for_response({"use_vector_index": True, "query_mode": "exact"}, _result_response())
+    db.dim = 2
+    db.document_embedding_encoding = "f32_le_b64"
+    db.live_ann_visibility_timeout = 0
+    db.live_ann_visibility_poll_interval = 0
+    db._client.upsert_documents = lambda *args, **kwargs: SimpleNamespace(upserted=1)
+    db._client.search_vector_index = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("search failed"))
+    db._client.delete_documents = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("cleanup delete failed"))
+
+    with pytest.raises(RuntimeError, match="search failed"):
+        db.preflight_live_ann()
 
 
 def test_treedb_live_ann_preflight_rejects_update_visible_at_old_vector() -> None:

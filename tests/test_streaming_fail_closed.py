@@ -1,5 +1,6 @@
 import concurrent.futures
 import multiprocessing as mp
+import queue
 from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import Any
@@ -22,7 +23,7 @@ def test_fixed_rate_runner_rejects_backlog_instead_of_skipping_data() -> None:
         db=SimpleNamespace(name="Test", init=init),
         dataset_iter=iter(()),
     )
-    runner.executing_futures = [object()] * 201
+    runner.executing_futures = [concurrent.futures.Future() for _ in range(201)]
 
     with pytest.raises(RuntimeError, match="backlog exceeded 200"):
         runner.run_with_rate(None)
@@ -39,7 +40,7 @@ def test_insert_backlog_wakes_waiting_streaming_search() -> None:
         insert = RatedMultiThreadingInsertRunner(
             rate=100, db=SimpleNamespace(name="Test", init=init), dataset_iter=iter(())
         )
-        insert.executing_futures = [object()] * 201
+        insert.executing_futures = [concurrent.futures.Future() for _ in range(201)]
         search = object.__new__(ReadWriteRunner)
         search.data_volume, search.insert_rate, search.search_stages = 200, 100, [0.5]
 
@@ -49,6 +50,23 @@ def test_insert_backlog_wakes_waiting_streaming_search() -> None:
         assert search.run_search_by_sig(q, stop) is None
     finally:
         manager.shutdown()
+
+
+def test_fixed_rate_runner_does_not_count_completed_tasks_as_backlog() -> None:
+    @contextmanager
+    def init():
+        yield
+
+    runner = RatedMultiThreadingInsertRunner(
+        rate=100,
+        db=SimpleNamespace(name="Test", init=init),
+        dataset_iter=iter(()),
+    )
+    runner.executing_futures = [concurrent.futures.Future() for _ in range(201)]
+    for future in runner.executing_futures:
+        future.set_result(None)
+
+    runner.run_with_rate(queue.Queue())
 
 
 def test_streaming_search_failure_stops_insert_and_parent_promptly(monkeypatch: pytest.MonkeyPatch) -> None:

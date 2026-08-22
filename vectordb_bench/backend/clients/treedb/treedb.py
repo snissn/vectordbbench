@@ -196,6 +196,7 @@ class TreeDB(VectorDB):
         positive = [1.0, *([0.0] * (self.dim - 1))]
         negative = [-1.0, *([0.0] * (self.dim - 1))]
         anchor = [0.0, 1.0, *([0.0] * (self.dim - 2))]
+        failure = None
         try:
             self._upsert_live_ann_probe(anchor_id, anchor)
             self._wait_for_live_ann(anchor_id, anchor, present=True, phase="anchor insert")
@@ -207,12 +208,18 @@ class TreeDB(VectorDB):
             self.client.delete_documents(self.index_name, [probe_id])
             self._wait_for_live_ann(probe_id, negative, present=False, phase="delete")
         except Exception as exc:
+            failure = exc
             msg = f"TreeDB live-ANN preflight failed on selected route {self._selected_ann_route()}: {exc}"
             raise RuntimeError(msg) from exc
         finally:
             try:
                 self.client.delete_documents(self.index_name, [probe_id, anchor_id])
-            except Exception:
+                self._wait_for_live_ann(anchor_id, anchor, present=False, phase="cleanup")
+            except Exception as exc:
+                if failure is None:
+                    route = self._selected_ann_route()
+                    msg = f"TreeDB live-ANN preflight cleanup failed on selected route {route}: {exc}"
+                    raise RuntimeError(msg) from exc
                 log.warning("TreeDB live-ANN preflight probe cleanup failed", exc_info=True)
 
     def _selected_ann_route(self) -> str:
