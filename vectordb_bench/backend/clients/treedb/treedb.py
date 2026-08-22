@@ -189,7 +189,7 @@ class TreeDB(VectorDB):
         if self.dim < 2:
             raise RuntimeError("TreeDB live-ANN preflight requires dim >= 2 for replacement visibility")
         if not callable(getattr(self.client, "delete_documents", None)):
-            raise RuntimeError("TreeDB live-ANN preflight requires delete_documents support")
+            raise NotImplementedError("TreeDB live-ANN preflight requires delete_documents support")
 
         probe_id = "__vectordbbench_live_ann_probe__"
         anchor_id = "__vectordbbench_live_ann_anchor__"
@@ -206,13 +206,13 @@ class TreeDB(VectorDB):
             self._wait_for_live_ann(anchor_id, positive, present=True, phase="update replacement")
             self.client.delete_documents(self.index_name, [probe_id])
             self._wait_for_live_ann(probe_id, negative, present=False, phase="delete")
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             msg = f"TreeDB live-ANN preflight failed on selected route {self._selected_ann_route()}: {exc}"
             raise RuntimeError(msg) from exc
         finally:
             try:
                 self.client.delete_documents(self.index_name, [probe_id, anchor_id])
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.warning("TreeDB live-ANN preflight probe cleanup failed", exc_info=True)
 
     def _selected_ann_route(self) -> str:
@@ -254,7 +254,8 @@ class TreeDB(VectorDB):
             raise RuntimeError("TreeDB live-ANN preflight response is missing selected-route proof")
         fallback_reason = str(diagnostics.get("fallback_reason") or "none")
         if fallback_reason not in ("none", ""):
-            raise RuntimeError(f"TreeDB live-ANN preflight reported fallback_reason={fallback_reason!r}")
+            msg = f"TreeDB live-ANN preflight reported fallback_reason={fallback_reason!r}"
+            raise RuntimeError(msg)
         if int(live.get("exact_fallbacks", -1)) != 0:
             raise RuntimeError("TreeDB live-ANN preflight used an exact fallback")
         if int(live.get("full_rebuilds", -1)) != 0:
@@ -300,14 +301,7 @@ class TreeDB(VectorDB):
         raise ValueError(msg)
 
     def _validate_config_shape(self) -> None:
-        if not math.isfinite(getattr(self, "live_ann_visibility_timeout", 5.0)) or getattr(
-            self, "live_ann_visibility_timeout", 5.0
-        ) <= 0:
-            raise ValueError("TreeDB live_ann_visibility_timeout must be > 0")
-        if not math.isfinite(getattr(self, "live_ann_visibility_poll_interval", 0.05)) or getattr(
-            self, "live_ann_visibility_poll_interval", 0.05
-        ) < 0:
-            raise ValueError("TreeDB live_ann_visibility_poll_interval must be >= 0")
+        self._validate_live_ann_timing()
         if self.query_embedding_encoding not in _QUERY_EMBEDDING_ENCODINGS:
             msg = f"TreeDB query_embedding_encoding={self.query_embedding_encoding!r} is not supported"
             raise ValueError(msg)
@@ -362,6 +356,24 @@ class TreeDB(VectorDB):
             return
         msg = f"TreeDB vector-index benchmark route does not support query_mode={mode!r}"
         raise ValueError(msg)
+
+    def _validate_live_ann_timing(self) -> None:
+        timeout = getattr(self, "live_ann_visibility_timeout", 5.0)
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not math.isfinite(timeout)
+            or timeout <= 0
+        ):
+            raise ValueError("TreeDB live_ann_visibility_timeout must be > 0")
+        interval = getattr(self, "live_ann_visibility_poll_interval", 0.05)
+        if (
+            isinstance(interval, bool)
+            or not isinstance(interval, (int, float))
+            or not math.isfinite(interval)
+            or interval < 0
+        ):
+            raise ValueError("TreeDB live_ann_visibility_poll_interval must be >= 0")
 
     def _validate_vector_index_response(self, response: Any) -> None:
         mode = self._search_param.get("query_mode") or "exact"

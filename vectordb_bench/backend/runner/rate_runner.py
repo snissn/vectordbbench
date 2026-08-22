@@ -133,7 +133,9 @@ class RatedMultiThreadingInsertRunner:
                         raise RuntimeError(msg)
                     finished, elapsed_time = submit_by_rate()
                     if finished is True:
-                        log.info(f"End of dataset, left unfinished={len(self.executing_futures)}, num_round={round_idx}")
+                        log.info(
+                            f"End of dataset, left unfinished={len(self.executing_futures)}, num_round={round_idx}"
+                        )
                         break
                     if elapsed_time >= 1.5:
                         log.warning(
