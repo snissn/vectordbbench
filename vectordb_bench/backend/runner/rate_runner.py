@@ -4,6 +4,7 @@ import multiprocessing as mp
 import time
 from concurrent.futures import ThreadPoolExecutor
 from copy import copy, deepcopy
+from typing import Any
 
 from vectordb_bench import config
 from vectordb_bench.backend.clients import api
@@ -80,13 +81,21 @@ class RatedMultiThreadingInsertRunner:
             _insert_embeddings(db, emb, metadata, retry_idx=0)
 
     @time_it
-    def run_with_rate(self, q: mp.Queue):
+    def run_with_rate(self, q: Any = None, stop: Any = None):  # noqa: C901, PLR0915
         with ThreadPoolExecutor(max_workers=mp.cpu_count()) as executor:
+
+            def stop_workers() -> None:
+                if stop is not None:
+                    stop.set()
+                if q is not None:
+                    q.put(None, block=True)
 
             @time_it
             def submit_by_rate() -> bool:
                 rate = self.batch_rate
                 for data in self.dataset:
+                    if stop is not None and stop.is_set():
+                        return True
                     emb, metadata = get_data(data, self.normalize)
                     self.executing_futures.append(executor.submit(self.send_insert_task, self.db, emb, metadata))
                     rate -= 1
@@ -97,9 +106,11 @@ class RatedMultiThreadingInsertRunner:
 
             def check_and_send_signal(wait_interval: float, finished: bool = False):
                 try:
+                    if stop is not None and stop.is_set():
+                        return
                     done, not_done = concurrent.futures.wait(
                         self.executing_futures,
-                        timeout=wait_interval,
+                        timeout=min(wait_interval, 0.05) if stop is not None else wait_interval,
                         return_when=concurrent.futures.FIRST_EXCEPTION,
                     )
                     _ = [fut.result() for fut in done]
@@ -118,7 +129,7 @@ class RatedMultiThreadingInsertRunner:
 
                 except Exception as e:
                     log.warning(f"task error, terminating, err={e}")
-                    q.put(None, block=True)
+                    stop_workers()
                     executor.shutdown(wait=True, cancel_futures=True)
                     raise e from None
 
@@ -128,8 +139,11 @@ class RatedMultiThreadingInsertRunner:
                 round_idx = 0
 
                 while True:
+                    if stop is not None and stop.is_set():
+                        return
                     if len(self.executing_futures) > 200:
                         msg = f"Fixed-rate insert backlog exceeded 200 unfinished tasks: {len(self.executing_futures)}"
+                        stop_workers()
                         raise RuntimeError(msg)
                     finished, elapsed_time = submit_by_rate()
                     if finished is True:
@@ -146,11 +160,17 @@ class RatedMultiThreadingInsertRunner:
                     check_and_send_signal(wait_interval=0.001, finished=False)
                     dur = time.perf_counter() - start_time - round_idx * time_per_batch
                     if dur < time_per_batch:
-                        time.sleep(time_per_batch - dur)
+                        if stop is not None:
+                            if stop.wait(time_per_batch - dur):
+                                return
+                        else:
+                            time.sleep(time_per_batch - dur)
                     round_idx += 1
 
                 # wait for all tasks in executing_futures to complete
                 while len(self.executing_futures) > 0:
+                    if stop is not None and stop.is_set():
+                        return
                     check_and_send_signal(wait_interval=1, finished=True)
                     round_idx += 1
 

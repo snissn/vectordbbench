@@ -239,15 +239,30 @@ class TreeDB(VectorDB):
             ids = _response_ids(response)
             if (probe_id in ids) is present:
                 return
-            if time.perf_counter() >= deadline:
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
                 expectation = "visible" if present else "absent"
                 msg = f"TreeDB live-ANN {phase} probe was not {expectation} before the visibility deadline"
                 raise RuntimeError(msg)
-            time.sleep(self.live_ann_visibility_poll_interval)
+            time.sleep(min(self.live_ann_visibility_poll_interval, remaining))
 
     def _validate_live_ann_response(self, response: Any) -> None:
+        mode = self._search_param.get("query_mode") or "exact"
+        stats = getattr(response, "stats", {}) or {}
         diagnostics = getattr(response, "diagnostics", {}) or {}
         live = diagnostics.get("live_ann")
+        if getattr(response, "no_documents", False) is not True:
+            raise RuntimeError("TreeDB live-ANN preflight response did not use the no-document route")
+        if getattr(response, "query_mode", "") != mode:
+            got = getattr(response, "query_mode", "")
+            msg = f"TreeDB live-ANN preflight response query_mode mismatch: got {got!r}, want {mode!r}"
+            raise RuntimeError(msg)
+        if mode != "exact" and getattr(response, "quantized_index_name", "") != self._search_param.get(
+            "quantized_index_name"
+        ):
+            raise RuntimeError("TreeDB live-ANN preflight response quantized index mismatch")
+        if _int_stat(stats, "documents_fetched") != 0 or _int_stat(stats, "document_bytes") != 0:
+            raise RuntimeError("TreeDB live-ANN preflight response fetched/materialized documents")
         if not isinstance(live, dict) or live.get("enabled") is not True:
             raise RuntimeError("TreeDB live-ANN preflight response is missing live mutation counters")
         if not isinstance(diagnostics.get("route"), str) or not diagnostics["route"]:

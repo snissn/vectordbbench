@@ -1,5 +1,8 @@
+import concurrent.futures
+import multiprocessing as mp
 from contextlib import contextmanager
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -23,6 +26,68 @@ def test_fixed_rate_runner_rejects_backlog_instead_of_skipping_data() -> None:
 
     with pytest.raises(RuntimeError, match="backlog exceeded 200"):
         runner.run_with_rate(None)
+
+
+def test_insert_backlog_wakes_waiting_streaming_search() -> None:
+    @contextmanager
+    def init():
+        yield
+
+    manager = mp.Manager()
+    try:
+        q, stop = manager.Queue(), manager.Event()
+        insert = RatedMultiThreadingInsertRunner(
+            rate=100, db=SimpleNamespace(name="Test", init=init), dataset_iter=iter(())
+        )
+        insert.executing_futures = [object()] * 201
+        search = object.__new__(ReadWriteRunner)
+        search.data_volume, search.insert_rate, search.search_stages = 200, 100, [0.5]
+
+        with pytest.raises(RuntimeError, match="backlog exceeded 200"):
+            insert.run_with_rate(q, stop)
+        assert stop.is_set()
+        assert search.run_search_by_sig(q, stop) is None
+    finally:
+        manager.shutdown()
+
+
+def test_streaming_search_failure_stops_insert_and_parent_promptly(monkeypatch: pytest.MonkeyPatch) -> None:
+    class ThreadExecutor:
+        def __init__(self, *args, **kwargs):
+            self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.shutdown(wait=True)
+
+        def submit(self, *args, **kwargs):
+            return self.executor.submit(*args, **kwargs)
+
+        def shutdown(self, **kwargs):
+            self.executor.shutdown(**kwargs)
+
+    runner = object.__new__(ReadWriteRunner)
+    stopped = []
+
+    def insert(_q: Any, stop: Any) -> tuple[None, int]:
+        stop.wait(1)
+        stopped.append(stop.is_set())
+        return None, 0
+
+    def search(_q: Any, _stop: Any) -> None:
+        raise RuntimeError("search failed")
+
+    runner.run_with_rate = insert
+    runner.run_search_by_sig = search
+    monkeypatch.setattr(
+        "vectordb_bench.backend.runner.read_write_runner.concurrent.futures.ProcessPoolExecutor", ThreadExecutor
+    )
+
+    with pytest.raises(RuntimeError, match="search failed"):
+        runner.run_read_write()
+    assert stopped == [True]
 
 
 def test_streaming_search_error_is_not_reported_as_zero_metrics() -> None:

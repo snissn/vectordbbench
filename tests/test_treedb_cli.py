@@ -4,7 +4,7 @@ import sys
 import threading
 from contextlib import contextmanager
 from types import ModuleType, SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from click.testing import CliRunner
@@ -751,6 +751,61 @@ def test_treedb_live_ann_preflight_requires_live_mutation_counters() -> None:
         db.preflight_live_ann()
 
 
+def test_treedb_live_ann_visibility_sleep_does_not_overshoot_deadline(monkeypatch: MonkeyPatch) -> None:
+    db = _tree_db_for_response(
+        {"use_vector_index": True, "query_mode": "exact", "ef_search": 64, "require_vector_index_guards": True},
+        _result_response(),
+    )
+    db.live_ann_visibility_timeout = 1
+    db.live_ann_visibility_poll_interval = 10
+    db._client.search_vector_index = lambda *_args, **_kwargs: _result_response(
+        results=[],
+        diagnostics={
+            "route": "live_native",
+            "fallback_reason": "none",
+            "live_ann": {"enabled": True, "exact_fallbacks": 0, "full_rebuilds": 0},
+        },
+    )
+    clock = iter([0.0, 0.2, 1.0])
+    sleeps = []
+    monkeypatch.setattr("vectordb_bench.backend.clients.treedb.treedb.time.perf_counter", lambda: next(clock))
+    monkeypatch.setattr("vectordb_bench.backend.clients.treedb.treedb.time.sleep", sleeps.append)
+
+    with pytest.raises(RuntimeError, match="visibility deadline"):
+        db._wait_for_live_ann("probe", [1.0, 0.0], present=True, phase="insert")
+    assert sleeps == [0.8]
+
+
+@pytest.mark.parametrize(
+    ("search_param", "overrides", "match"),
+    [
+        ({"query_mode": "exact"}, {"query_mode": "quantized_only"}, "query_mode mismatch"),
+        ({"query_mode": "exact"}, {"no_documents": False}, "no-document route"),
+        ({"query_mode": "exact"}, {"stats": {"documents_fetched": 1}}, "fetched/materialized documents"),
+        (
+            {"query_mode": "quantized_only", "quantized_index_name": "expected"},
+            {"query_mode": "quantized_only", "quantized_index_name": "other"},
+            "quantized index mismatch",
+        ),
+    ],
+)
+def test_treedb_live_ann_preflight_rejects_non_live_transport_proof(
+    search_param: dict[str, str], overrides: dict[str, Any], match: str
+) -> None:
+    db = _tree_db_for_response({"use_vector_index": True, **search_param}, _result_response())
+    response = _result_response(
+        diagnostics={
+            "route": "live_native",
+            "fallback_reason": "none",
+            "live_ann": {"enabled": True, "exact_fallbacks": 0, "full_rebuilds": 0},
+        },
+        **overrides,
+    )
+
+    with pytest.raises(RuntimeError, match=match):
+        db._validate_live_ann_response(response)
+
+
 def test_treedb_live_ann_preflight_proves_insert_update_and_delete() -> None:
     probe = SimpleNamespace(id="__vectordbbench_live_ann_probe__")
     anchor = SimpleNamespace(id="__vectordbbench_live_ann_anchor__")
@@ -762,7 +817,7 @@ def test_treedb_live_ann_preflight_proves_insert_update_and_delete() -> None:
                 "route": "exact_hnsw_search_pack_v1",
                 "fallback_reason": "none",
                 "live_ann": live,
-            }
+            },
         ),
         _result_response(
             results=[probe],
@@ -770,7 +825,7 @@ def test_treedb_live_ann_preflight_proves_insert_update_and_delete() -> None:
                 "route": "exact_hnsw_search_pack_v1",
                 "fallback_reason": "none",
                 "live_ann": live,
-            }
+            },
         ),
         _result_response(
             results=[probe],
@@ -809,10 +864,22 @@ def test_treedb_live_ann_preflight_rejects_update_visible_at_old_vector() -> Non
     anchor = SimpleNamespace(id="__vectordbbench_live_ann_anchor__")
     live = {"enabled": True, "exact_fallbacks": 0, "full_rebuilds": 0}
     responses = [
-        _result_response(results=[anchor], diagnostics={"route": "exact_hnsw_search_pack_v1", "fallback_reason": "none", "live_ann": live}),
-        _result_response(results=[probe], diagnostics={"route": "exact_hnsw_search_pack_v1", "fallback_reason": "none", "live_ann": live}),
-        _result_response(results=[probe], diagnostics={"route": "exact_hnsw_search_pack_v1", "fallback_reason": "none", "live_ann": live}),
-        _result_response(results=[probe], diagnostics={"route": "exact_hnsw_search_pack_v1", "fallback_reason": "none", "live_ann": live}),
+        _result_response(
+            results=[anchor],
+            diagnostics={"route": "exact_hnsw_search_pack_v1", "fallback_reason": "none", "live_ann": live},
+        ),
+        _result_response(
+            results=[probe],
+            diagnostics={"route": "exact_hnsw_search_pack_v1", "fallback_reason": "none", "live_ann": live},
+        ),
+        _result_response(
+            results=[probe],
+            diagnostics={"route": "exact_hnsw_search_pack_v1", "fallback_reason": "none", "live_ann": live},
+        ),
+        _result_response(
+            results=[probe],
+            diagnostics={"route": "exact_hnsw_search_pack_v1", "fallback_reason": "none", "live_ann": live},
+        ),
     ]
     db = _tree_db_for_response(
         {"use_vector_index": True, "query_mode": "exact", "ef_search": 64, "require_vector_index_guards": True},
