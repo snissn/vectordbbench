@@ -551,6 +551,12 @@ def test_treedb_config_shape_rejects_quantized_rerank_without_index() -> None:
     with pytest.raises(ValueError, match="compact IDs responses are supported only for the vector-index route"):
         db._validate_config_shape()
 
+    db.response_format = "full"
+    db.stats_mode = "production"
+    with pytest.raises(ValueError, match="production stats mode is supported only for the vector-index route"):
+        db._validate_config_shape()
+
+    db.stats_mode = "full_diagnostics"
     db.response_format = "ids"
     db._search_param = {
         "use_vector_index": True,
