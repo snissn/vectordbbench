@@ -91,6 +91,26 @@ class TreeDBBaseTypedDict(CommonTypedDict):
             show_default=True,
         ),
     ]
+    live_ann_visibility_timeout: Annotated[
+        float,
+        click.option(
+            "--live-ann-visibility-timeout",
+            type=float,
+            default=5.0,
+            show_default=True,
+            help="Fail a TreeDB streaming preflight when an acknowledged mutation is not ANN-visible in this time",
+        ),
+    ]
+    live_ann_visibility_poll_interval: Annotated[
+        float,
+        click.option(
+            "--live-ann-visibility-poll-interval",
+            type=float,
+            default=0.05,
+            show_default=True,
+            help="TreeDB live-ANN preflight probe interval in seconds",
+        ),
+    ]
 
 
 class TreeDBTypedDict(TreeDBBaseTypedDict):
@@ -217,6 +237,8 @@ def _treedb_config(parameters):
         query_embedding_encoding=parameters["query_embedding_encoding"],
         stats_mode=parameters["stats_mode"],
         response_format=parameters["response_format"],
+        live_ann_visibility_timeout=parameters["live_ann_visibility_timeout"],
+        live_ann_visibility_poll_interval=parameters["live_ann_visibility_poll_interval"],
     )
 
 

@@ -5,6 +5,7 @@ import math
 import multiprocessing as mp
 import time
 from collections.abc import Iterable
+from typing import Any
 
 import numpy as np
 
@@ -134,7 +135,7 @@ class ReadWriteRunner(MultiProcessingSearchRunner, RatedMultiThreadingInsertRunn
             )
         ]
 
-    def run_read_write(self) -> Metric:
+    def run_read_write(self) -> Metric:  # noqa: PLR0915
         """
         Test search performance with a fixed insert rate.
         - Insert requests are sent to VectorDB at a fixed rate within a dedicated insert process pool.
@@ -148,12 +149,19 @@ class ReadWriteRunner(MultiProcessingSearchRunner, RatedMultiThreadingInsertRunn
         m = Metric()
         with mp.Manager() as mp_manager:
             q = mp_manager.Queue()
+            stop = mp_manager.Event()
             with concurrent.futures.ProcessPoolExecutor(mp_context=mp.get_context("spawn"), max_workers=2) as executor:
-                insert_future = executor.submit(self.run_with_rate, q)
-                streaming_search_future = executor.submit(self.run_search_by_sig, q)
+                insert_future = executor.submit(self.run_with_rate, q, stop)
+                streaming_search_future = executor.submit(self.run_search_by_sig, q, stop)
 
                 try:
                     start_time = time.perf_counter()
+                    concurrent.futures.wait(
+                        [insert_future, streaming_search_future], return_when=concurrent.futures.FIRST_EXCEPTION
+                    )
+                    for future in (insert_future, streaming_search_future):
+                        if future.done():
+                            future.result()
                     _, m.insert_duration = insert_future.result()
                     streaming_search_res = streaming_search_future.result()
                     if streaming_search_res is None:
@@ -192,8 +200,11 @@ class ReadWriteRunner(MultiProcessingSearchRunner, RatedMultiThreadingInsertRunn
 
                 except Exception as e:
                     log.warning(f"Read and write error: {e}")
-                    executor.shutdown(wait=True, cancel_futures=True)
-                    # raise e
+                    stop.set()
+                    q.put(None, block=True)
+                    insert_future.cancel()
+                    streaming_search_future.cancel()
+                    raise
         m.st_ideal_insert_duration = math.ceil(self.data_volume / self.insert_rate)
         log.info(f"Concurrent read write all done, results: {m}")
         return m
@@ -222,7 +233,7 @@ class ReadWriteRunner(MultiProcessingSearchRunner, RatedMultiThreadingInsertRunn
             log.warning(warning_msg)
         return each_conc_search_dur
 
-    def run_search_by_sig(self, q: mp.Queue):
+    def run_search_by_sig(self, q: mp.Queue, stop: Any = None):
         """
         Args:
             q: multiprocessing queue
@@ -239,7 +250,7 @@ class ReadWriteRunner(MultiProcessingSearchRunner, RatedMultiThreadingInsertRunn
             while start < target_batch:
                 sig = q.get(block=True)
 
-                if sig is None or sig is True:
+                if sig is None or sig is True or (stop is not None and stop.is_set()):
                     return False
                 start += 1
             return True
@@ -290,6 +301,11 @@ class ReadWriteRunner(MultiProcessingSearchRunner, RatedMultiThreadingInsertRunn
                     log.warning(f"Skip concurrent tests, each_conc_search_dur={each_conc_search_dur} less than 10s.")
             except Exception as e:
                 log.warning(f"Streaming Search Failed at stage={stage}. Exception: {e}")
+                if stop is not None:
+                    stop.set()
+                if q is not None:
+                    q.put(None, block=True)
+                raise
             result.append(
                 (
                     perc,
