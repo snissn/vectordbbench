@@ -187,8 +187,8 @@ TreeDB vector-index streaming cases first insert, replace, and delete determinis
 Run a TreeDB streaming case with `--use-vector-index` and retain the command output. For example, use the existing command help to select `StreamingPerformanceCase` at 500 or 1000 vectors/s:
 
 ```shell
-vectordbbench TreeDBHNSW --help
-vectordbbench TreeDBHNSW --base-url http://127.0.0.1:7120 --use-vector-index \
+vectordbbench treedbhnsw --help
+vectordbbench treedbhnsw --base-url http://127.0.0.1:7120 --use-vector-index \
   --strategy native_runtime --stats-mode production --response-format ids \
   --skip-vector-index-guards --live-ann-visibility-timeout 5
 ```
