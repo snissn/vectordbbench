@@ -1320,8 +1320,16 @@ def test_treedb_config_shape_rejects_quantized_rerank_without_index() -> None:
     with pytest.raises(ValueError, match="separate full-response preflight"):
         db._validate_config_shape()
 
+    db.db_case_config = SimpleNamespace(strategy="native_runtime")
+    db.response_format = "full"
+    db.stats_mode = "full_diagnostics"
+    db._search_param["require_vector_index_guards"] = False
+    with pytest.raises(ValueError, match="native_runtime.*stats_mode=production"):
+        db._validate_config_shape()
+
     db.response_format = "full"
     db.stats_mode = "production"
+    db._search_param["require_vector_index_guards"] = True
     with pytest.raises(ValueError, match="separate full-response preflight"):
         db._validate_config_shape()
 

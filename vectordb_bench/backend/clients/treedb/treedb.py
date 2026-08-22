@@ -350,6 +350,9 @@ class TreeDB(VectorDB):
         if self._metric != "cosine":
             msg = "TreeDB vector-index benchmark route currently supports only cosine metric"
             raise ValueError(msg)
+        strategy = getattr(getattr(self, "db_case_config", None), "strategy", "column_graph")
+        if strategy == "native_runtime" and self.stats_mode != "production":
+            raise ValueError("TreeDB native_runtime benchmark route requires stats_mode=production")
         mode = self._search_param.get("query_mode") or "exact"
         quantized_name = self._search_param.get("quantized_index_name") or ""
         rerank_candidates = int(self._search_param.get("quantized_rerank_candidates") or 0)
