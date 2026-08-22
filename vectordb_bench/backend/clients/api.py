@@ -182,6 +182,8 @@ class VectorDB(ABC):
     # If False, concurrent runners will deep-copy the instance and call
     # init() per thread instead of sharing the parent connection.
     thread_safe: bool = True
+    # Opt in only when each concurrent insert worker must own its init() scope.
+    worker_owned_clients: bool = False
 
     @classmethod
     def filter_supported(cls, filters: Filter) -> bool:

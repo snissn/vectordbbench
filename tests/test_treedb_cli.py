@@ -1,4 +1,6 @@
+import pickle
 import sys
+import threading
 from types import ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING
 
@@ -14,9 +16,95 @@ from vectordb_bench.backend.clients.treedb.config import (
     TreeDBHNSWConfig,
     TreeDBScalarU8RerankConfig,
 )
+from vectordb_bench.backend.runner.concurrent_runner import ConcurrentInsertRunner
 
 if TYPE_CHECKING:
     from vectordb_bench.backend.clients.treedb.treedb import TreeDB
+
+
+def test_treedb_concurrent_insert_uses_and_closes_distinct_worker_clients(monkeypatch: MonkeyPatch) -> None:
+    class Data:
+        train_id_field = "id"
+        train_vector_field = "vector"
+
+    class Dataset:
+        data = Data()
+
+        def iter_batches(self, batch_size):
+            import numpy as np
+            import pandas as pd
+
+            return iter(
+                [
+                    pd.DataFrame({"id": [row_id], "vector": [np.array([float(row_id), 1.0])]})
+                    for row_id in range(2)
+                ]
+            )
+
+    clients = []
+    insert_gate = threading.Barrier(2)
+
+    class FakeDocument:
+        def __init__(self, id, embedding):
+            self.id = id
+            self.embedding = embedding
+
+    class FakeClient:
+        def __init__(self, base_url, timeout=30.0):
+            self.closed = False
+            self.inserting = False
+            clients.append(self)
+
+        def create_index(self, *args, **kwargs):
+            pass
+
+        def close(self):
+            self.closed = True
+
+        def upsert_documents(self, index_name, documents, *, defer_vector_index_rebuild=False):
+            assert not self.closed
+            assert not self.inserting
+            self.inserting = True
+            try:
+                insert_gate.wait(timeout=2)
+                return SimpleNamespace(upserted=len(documents))
+            finally:
+                self.inserting = False
+
+    fake_module = ModuleType("treedb_client")
+    fake_module.Document = FakeDocument
+    fake_module.TreeDBClient = FakeClient
+    monkeypatch.setitem(sys.modules, "treedb_client", fake_module)
+
+    from vectordb_bench.backend.clients.treedb.treedb import TreeDB
+
+    db = TreeDB(
+        dim=2,
+        db_config={"base_url": "http://127.0.0.1:7120", "index_name": "bench"},
+        db_case_config=TreeDBColumnGraphExactConfig(),
+    )
+    assert clients[0].closed
+
+    runner = ConcurrentInsertRunner(db, Dataset(), normalize=False, max_workers=2, batch_size=1)
+    assert runner.load_concurrency == {"requested": 2, "effective": 2}
+    with db.init():
+        assert pickle.loads(pickle.dumps(db))._client is None  # noqa: S301
+    assert runner.task() == 2
+    worker_clients = clients[2:]
+    assert len(worker_clients) == 2
+    assert len({id(client) for client in worker_clients}) == 2
+    assert all(client.closed for client in worker_clients)
+
+
+def test_treedb_async_insert_clamps_to_one_thread_local_worker() -> None:
+    from vectordb_bench.backend.clients.treedb.treedb import TreeDB
+    from vectordb_bench.backend.runner.concurrent_runner import ExecutorBackend
+
+    db = object.__new__(TreeDB)
+    db.name = "TreeDB"
+    runner = ConcurrentInsertRunner(db, SimpleNamespace(), normalize=False, max_workers=4, backend=ExecutorBackend.ASYNC)
+
+    assert runner.load_concurrency == {"requested": 4, "effective": 1}
 
 
 def test_treedb_config_to_dict_and_case_config_scalar_u8_rerank() -> None:

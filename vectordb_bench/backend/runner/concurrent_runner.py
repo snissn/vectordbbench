@@ -13,6 +13,7 @@ import logging
 import multiprocessing as mp
 import threading
 import time
+from contextlib import contextmanager, nullcontext
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
@@ -80,15 +81,23 @@ class ConcurrentInsertRunner:
         self.with_scalar_labels = with_scalar_labels
         self.tenant_case = tenant_case
 
-        effective_workers = max_workers or min(mp.cpu_count(), 4)
+        self.requested_workers = max_workers or min(mp.cpu_count(), 4)
+        effective_workers = self.requested_workers
         if not db.thread_safe:
             log.info(f"DB {db.name} is not thread-safe, falling back to max_workers=1")
+            effective_workers = 1
+        elif getattr(db, "worker_owned_clients", False) and backend == ExecutorBackend.ASYNC:
+            log.info(f"DB {db.name} uses thread-local worker clients, falling back to max_workers=1 for async")
             effective_workers = 1
         self.max_workers = effective_workers
         assert db.thread_safe or self.max_workers == 1, (
             "Non-thread-safe DBs must use max_workers=1 — "
             "_get_thread_db() relies on this to avoid concurrent access to self.db"
         )
+
+    @property
+    def load_concurrency(self) -> dict[str, int]:
+        return {"requested": self.requested_workers, "effective": self.max_workers}
 
     def __getstate__(self):
         """Exclude unpicklable thread-local state for ProcessPoolExecutor(spawn)."""
@@ -161,6 +170,17 @@ class ConcurrentInsertRunner:
         db = self._get_thread_db()
         return self._insert_batch_with_retry(db, embeddings, metadata, labels_data, tenant_labels_data)
 
+    @contextmanager
+    def _worker_db(self):
+        """Yield a worker-owned DB session when the adapter opts in."""
+        db = self._get_thread_db()
+        if getattr(db, "worker_owned_clients", False):
+            with db.init():
+                yield db
+            return
+        with nullcontext(db) as shared_db:
+            yield shared_db
+
     def _next_batch(self) -> tuple[list[list[float]], list[int], list[str] | None, list[str] | None] | None:
         """Pull the next batch from the shared dataset iterator.
 
@@ -207,12 +227,13 @@ class ConcurrentInsertRunner:
         """Worker loop: pull batches from the shared iterator and insert them."""
         total = 0
         try:
-            while True:
-                batch = self._next_batch()
-                if batch is None:
-                    break
-                embeddings, metadata, labels_data, tenant_labels_data = batch
-                total += self._worker_insert(embeddings, metadata, labels_data, tenant_labels_data)
+            with self._worker_db() as db:
+                while True:
+                    batch = self._next_batch()
+                    if batch is None:
+                        break
+                    embeddings, metadata, labels_data, tenant_labels_data = batch
+                    total += self._insert_batch_with_retry(db, embeddings, metadata, labels_data, tenant_labels_data)
         except Exception:
             stop_event = getattr(self, "_stop_event", None)
             if stop_event is not None:
@@ -228,10 +249,12 @@ class ConcurrentInsertRunner:
         self._deadline = None if self.duration is None else time.perf_counter() + self.duration
         self._dataset_iter = self.dataset.iter_batches(self.batch_size)
 
-        with self.db.init():
+        task_db = nullcontext() if getattr(self.db, "worker_owned_clients", False) else self.db.init()
+        with task_db:
             log.info(
                 f"({mp.current_process().name:16}) Start concurrent insert, "
-                f"batch_size={self.batch_size}, max_workers={self.max_workers}"
+                f"batch_size={self.batch_size}, requested_workers={self.requested_workers}, "
+                f"effective_workers={self.max_workers}"
             )
             start = time.perf_counter()
 

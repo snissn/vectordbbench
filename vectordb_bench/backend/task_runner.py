@@ -303,6 +303,7 @@ class CaseRunner(BaseModel):
                         f" insert_duration={load_dur}, optimize_duration={build_dur}"
                         f" load_duration(insert + optimize) = {m.load_duration}"
                     )
+                    m.additional_parameters["load_concurrency"] = self._last_load_concurrency
                 else:
                     log.info("Data loading skipped")
             if TaskStage.SEARCH_SERIAL in self.config.stages or TaskStage.SEARCH_CONCURRENT in self.config.stages:
@@ -460,6 +461,7 @@ class CaseRunner(BaseModel):
                 **runner_kwargs,
             )
             runner.run()
+            self._last_load_concurrency = runner.load_concurrency
         except Exception as e:
             raise e from None
         finally:
