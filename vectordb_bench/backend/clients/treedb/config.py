@@ -10,6 +10,8 @@ class TreeDBConfig(DBConfig):
     index_name: str = "vector_bench_test"
     timeout: float = 30.0
     query_embedding_encoding: str = "json"
+    stats_mode: str = "full_diagnostics"
+    response_format: str = "full"
 
     def to_dict(self) -> dict:
         return {
@@ -17,6 +19,8 @@ class TreeDBConfig(DBConfig):
             "index_name": self.index_name,
             "timeout": self.timeout,
             "query_embedding_encoding": self.query_embedding_encoding,
+            "stats_mode": self.stats_mode,
+            "response_format": self.response_format,
         }
 
 

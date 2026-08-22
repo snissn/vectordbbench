@@ -63,6 +63,24 @@ class TreeDBBaseTypedDict(CommonTypedDict):
             ),
         ),
     ]
+    stats_mode: Annotated[
+        str,
+        click.option(
+            "--stats-mode",
+            type=click.Choice(["full_diagnostics", "production"]),
+            default="full_diagnostics",
+            show_default=True,
+        ),
+    ]
+    response_format: Annotated[
+        str,
+        click.option(
+            "--response-format",
+            type=click.Choice(["full", "ids"]),
+            default="full",
+            show_default=True,
+        ),
+    ]
 
 
 class TreeDBTypedDict(TreeDBBaseTypedDict):
@@ -186,6 +204,8 @@ def _treedb_config(parameters):
         index_name=parameters["index_name"],
         timeout=parameters["timeout"],
         query_embedding_encoding=parameters["query_embedding_encoding"],
+        stats_mode=parameters["stats_mode"],
+        response_format=parameters["response_format"],
     )
 
 

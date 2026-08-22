@@ -1,8 +1,9 @@
 import sys
 from types import ModuleType, SimpleNamespace
+from typing import TYPE_CHECKING
 
-from click.testing import CliRunner
 import pytest
+from click.testing import CliRunner
 from pytest import MonkeyPatch
 
 from vectordb_bench.backend.clients import DB, IndexType
@@ -13,6 +14,9 @@ from vectordb_bench.backend.clients.treedb.config import (
     TreeDBHNSWConfig,
     TreeDBScalarU8RerankConfig,
 )
+
+if TYPE_CHECKING:
+    from vectordb_bench.backend.clients.treedb.treedb import TreeDB
 
 
 def test_treedb_config_to_dict_and_case_config_scalar_u8_rerank() -> None:
@@ -28,6 +32,8 @@ def test_treedb_config_to_dict_and_case_config_scalar_u8_rerank() -> None:
         "index_name": "bench",
         "timeout": 5,
         "query_embedding_encoding": "f32_le_b64",
+        "stats_mode": "full_diagnostics",
+        "response_format": "full",
     }
 
     case = TreeDBHNSWConfig(
@@ -83,6 +89,8 @@ def test_treedb_cli_dry_run_captures_scalar_u8_rerank(monkeypatch: MonkeyPatch) 
             "32",
             "--query-embedding-encoding",
             "f32_le_b64",
+            "--stats-mode",
+            "production",
             "--skip-load",
             "--skip-search-serial",
             "--skip-search-concurrent",
@@ -94,6 +102,7 @@ def test_treedb_cli_dry_run_captures_scalar_u8_rerank(monkeypatch: MonkeyPatch) 
     assert captured["args"][0] == DB.TreeDB
     assert captured["args"][1].base_url == "http://127.0.0.1:7120"
     assert captured["args"][1].query_embedding_encoding == "f32_le_b64"
+    assert captured["args"][1].stats_mode == "production"
     assert captured["args"][2].use_vector_index is True
     assert captured["args"][2].query_mode == "quantized_rerank"
     assert captured["args"][2].quantized_rerank_candidates == 32
@@ -324,13 +333,66 @@ class _FakeTreeDBClient:
         return self.response
 
 
-def _tree_db_for_response(search_param: dict, response):
+def test_treedb_worker_lifecycle_closes_client() -> None:
+    from vectordb_bench.backend.clients.treedb.treedb import TreeDB
+
+    client = SimpleNamespace(close=lambda: setattr(client, "closed", True), closed=False)
+    db = object.__new__(TreeDB)
+    db._client = None
+    db._new_client = lambda: client
+
+    with db.init():
+        assert db.client is client
+
+    assert client.closed is True
+    assert db._client is None
+
+
+def test_treedb_cleanup_preserves_primary_errors(monkeypatch: MonkeyPatch) -> None:
+    class FailingClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def create_index(self, *args, **kwargs) -> None:
+            msg = "create failed"
+            raise RuntimeError(msg)
+
+        def close(self) -> None:
+            msg = "close failed"
+            raise RuntimeError(msg)
+
+    fake_module = ModuleType("treedb_client")
+    fake_module.TreeDBClient = FailingClient
+    monkeypatch.setitem(sys.modules, "treedb_client", fake_module)
+
+    from vectordb_bench.backend.clients.treedb.treedb import TreeDB
+
+    with pytest.raises(RuntimeError, match="create failed"):
+        TreeDB(
+            dim=2,
+            db_config={"base_url": "http://127.0.0.1:7120"},
+            db_case_config=TreeDBHNSWConfig(),
+        )
+
+    db = object.__new__(TreeDB)
+    db._client = None
+    db._new_client = FailingClient
+    with pytest.raises(RuntimeError, match="worker failed"):
+        with db.init():
+            msg = "worker failed"
+            raise RuntimeError(msg)
+    assert db._client is None
+
+
+def _tree_db_for_response(search_param: dict, response) -> "TreeDB":
     from vectordb_bench.backend.clients.treedb.treedb import TreeDB
 
     db = object.__new__(TreeDB)
     db.index_name = "bench"
     db._client = _FakeTreeDBClient(response)
     db.query_embedding_encoding = "json"
+    db.stats_mode = "full_diagnostics"
+    db.response_format = "full"
     db._search_param = search_param
     return db
 
@@ -367,6 +429,25 @@ def test_treedb_vector_index_search_passes_query_embedding_encoding(encoding: st
 
     assert db.search_embedding([1.0, 0.0], 1) == [7]
     assert db._client.calls[0][1]["query_embedding_encoding"] == encoding
+
+
+def test_treedb_compact_production_search_returns_ordered_ids() -> None:
+    db = _tree_db_for_response(
+        {
+            "use_vector_index": True,
+            "query_mode": "quantized_rerank",
+            "ef_search": 64,
+            "require_vector_index_guards": False,
+        },
+        SimpleNamespace(ids=["7", "3"]),
+    )
+    db.query_embedding_encoding = "f32_le"
+    db.stats_mode = "production"
+    db.response_format = "ids"
+
+    assert db.search_embedding([1.0, 0.0], 2) == [7, 3]
+    assert db._client.calls[0][1]["stats_mode"] == "production"
+    assert db._client.calls[0][1]["response_format"] == "ids"
 
 
 def test_treedb_exact_vector_index_response_guard_rejects_quantized_activity() -> None:
@@ -472,6 +553,8 @@ def test_treedb_config_shape_rejects_quantized_rerank_without_index() -> None:
 
     db = object.__new__(TreeDB)
     db.query_embedding_encoding = "json"
+    db.stats_mode = "full_diagnostics"
+    db.response_format = "full"
     db._metric = "cosine"
     db._search_param = {
         "use_vector_index": True,
@@ -496,7 +579,34 @@ def test_treedb_config_shape_rejects_quantized_rerank_without_index() -> None:
         "quantized_index_name": "embedding.scalar_u8.fast",
         "quantized_rerank_candidates": 32,
     }
-    with pytest.raises(ValueError, match="exact vector-index search"):
+    db._validate_config_shape()
+
+    db.query_embedding_encoding = "json"
+    db.response_format = "ids"
+    db._search_param = {"use_vector_index": False}
+    with pytest.raises(ValueError, match="compact IDs responses are supported only for the vector-index route"):
+        db._validate_config_shape()
+
+    db.response_format = "full"
+    db.stats_mode = "production"
+    with pytest.raises(ValueError, match="production stats mode is supported only for the vector-index route"):
+        db._validate_config_shape()
+
+    db.stats_mode = "full_diagnostics"
+    db.response_format = "ids"
+    db._search_param = {
+        "use_vector_index": True,
+        "query_mode": "quantized_rerank",
+        "quantized_index_name": "embedding.scalar_u8.fast",
+        "quantized_rerank_candidates": 32,
+    }
+    db._search_param["require_vector_index_guards"] = True
+    with pytest.raises(ValueError, match="separate full-response preflight"):
+        db._validate_config_shape()
+
+    db.response_format = "full"
+    db.stats_mode = "production"
+    with pytest.raises(ValueError, match="separate full-response preflight"):
         db._validate_config_shape()
 
 
