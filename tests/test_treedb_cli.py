@@ -753,13 +753,14 @@ def test_treedb_live_ann_preflight_requires_live_mutation_counters() -> None:
 
 def test_treedb_live_ann_preflight_proves_insert_update_and_delete() -> None:
     probe = SimpleNamespace(id="__vectordbbench_live_ann_probe__")
+    live = {"enabled": True, "selected_route": "mutable_native", "exact_fallbacks": 0, "full_rebuilds": 0}
     responses = [
         _result_response(
             results=[probe],
             diagnostics={
                 "route": "exact_hnsw_search_pack_v1",
                 "fallback_reason": "none",
-                "live_ann": {"enabled": True, "base_candidates": 1, "delta_candidates": 1, "exact_fallbacks": 0, "full_rebuilds": 0},
+                "live_ann": live,
             }
         ),
         _result_response(
@@ -767,7 +768,7 @@ def test_treedb_live_ann_preflight_proves_insert_update_and_delete() -> None:
             diagnostics={
                 "route": "exact_hnsw_search_pack_v1",
                 "fallback_reason": "none",
-                "live_ann": {"enabled": True, "base_candidates": 1, "delta_candidates": 1, "exact_fallbacks": 0, "full_rebuilds": 0},
+                "live_ann": live,
             }
         ),
         _result_response(
@@ -775,8 +776,12 @@ def test_treedb_live_ann_preflight_proves_insert_update_and_delete() -> None:
             diagnostics={
                 "route": "exact_hnsw_search_pack_v1",
                 "fallback_reason": "none",
-                "live_ann": {"enabled": True, "base_candidates": 1, "delta_candidates": 1, "exact_fallbacks": 0, "full_rebuilds": 0},
+                "live_ann": live,
             },
+        ),
+        _result_response(
+            results=[],
+            diagnostics={"route": "exact_hnsw_search_pack_v1", "fallback_reason": "none", "live_ann": live},
         ),
     ]
     db = _tree_db_for_response(
@@ -792,6 +797,51 @@ def test_treedb_live_ann_preflight_proves_insert_update_and_delete() -> None:
     db._client.search_vector_index = lambda *args, **kwargs: responses.pop(0)
 
     db.preflight_live_ann()
+
+
+def test_treedb_live_ann_preflight_rejects_update_visible_at_old_vector() -> None:
+    probe = SimpleNamespace(id="__vectordbbench_live_ann_probe__")
+    live = {"enabled": True, "selected_route": "mutable_native", "exact_fallbacks": 0, "full_rebuilds": 0}
+    responses = [
+        _result_response(results=[probe], diagnostics={"route": "exact_hnsw_search_pack_v1", "fallback_reason": "none", "live_ann": live}),
+        _result_response(results=[probe], diagnostics={"route": "exact_hnsw_search_pack_v1", "fallback_reason": "none", "live_ann": live}),
+        _result_response(results=[probe], diagnostics={"route": "exact_hnsw_search_pack_v1", "fallback_reason": "none", "live_ann": live}),
+    ]
+    db = _tree_db_for_response(
+        {"use_vector_index": True, "query_mode": "exact", "ef_search": 64, "require_vector_index_guards": True},
+        responses[0],
+    )
+    db.dim = 2
+    db.document_embedding_encoding = "f32_le_b64"
+    db.live_ann_visibility_timeout = 0
+    db.live_ann_visibility_poll_interval = 0
+    db._client.upsert_documents = lambda *args, **kwargs: SimpleNamespace(upserted=1)
+    deleted = []
+    db._client.delete_documents = lambda *args, **kwargs: deleted.append(args[1])
+    db._client.search_vector_index = lambda *args, **kwargs: responses.pop(0)
+
+    with pytest.raises(RuntimeError, match="update replacement.*not absent"):
+        db.preflight_live_ann()
+    assert deleted == [["__vectordbbench_live_ann_probe__"]]
+
+
+def test_treedb_live_ann_preflight_cleans_up_after_search_failure() -> None:
+    db = _tree_db_for_response(
+        {"use_vector_index": True, "query_mode": "exact", "ef_search": 64, "require_vector_index_guards": True},
+        _result_response(),
+    )
+    db.dim = 2
+    db.document_embedding_encoding = "f32_le_b64"
+    db.live_ann_visibility_timeout = 0.01
+    db.live_ann_visibility_poll_interval = 0
+    db._client.upsert_documents = lambda *args, **kwargs: SimpleNamespace(upserted=1)
+    deleted = []
+    db._client.delete_documents = lambda *args, **kwargs: deleted.append(args[1])
+    db._client.search_vector_index = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("search failed"))
+
+    with pytest.raises(RuntimeError, match="search failed"):
+        db.preflight_live_ann()
+    assert deleted == [["__vectordbbench_live_ann_probe__"]]
 
 
 def test_treedb_live_ann_preflight_names_unsupported_selected_route() -> None:
@@ -1008,3 +1058,22 @@ def test_treedb_named_configs_have_expected_modes() -> None:
     scalar = TreeDBScalarU8RerankConfig()
     assert scalar.search_param()["query_mode"] == "quantized_rerank"
     assert scalar.search_param()["quantized_rerank_candidates"] == 32
+
+
+@pytest.mark.parametrize(
+    ("timeout", "interval", "message"),
+    [(0, 0, "visibility_timeout"), (1, -0.1, "poll_interval")],
+)
+def test_treedb_rejects_invalid_live_ann_probe_timing(timeout: float, interval: float, message: str) -> None:
+    from vectordb_bench.backend.clients.treedb.treedb import TreeDB
+
+    db = object.__new__(TreeDB)
+    db.query_embedding_encoding = "json"
+    db.stats_mode = "full_diagnostics"
+    db.response_format = "full"
+    db.live_ann_visibility_timeout = timeout
+    db.live_ann_visibility_poll_interval = interval
+    db._search_param = {"use_vector_index": False}
+
+    with pytest.raises(ValueError, match=message):
+        db._validate_config_shape()

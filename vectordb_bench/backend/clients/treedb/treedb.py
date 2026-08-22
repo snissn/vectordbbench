@@ -1,5 +1,6 @@
 import base64
 import logging
+import math
 import threading
 import time
 from contextlib import contextmanager
@@ -173,6 +174,10 @@ class TreeDB(VectorDB):
     def optimize(self, data_size: int | None = None):
         self.client.optimize_index(self.index_name)
 
+    @property
+    def requires_live_ann_preflight(self) -> bool:
+        return bool(self._search_param.get("use_vector_index"))
+
     def preflight_live_ann(self) -> None:
         """Prove one insert, update, and delete reaches the selected ANN route.
 
@@ -187,16 +192,25 @@ class TreeDB(VectorDB):
         probe_id = "__vectordbbench_live_ann_probe__"
         positive = [1.0, *([0.0] * (self.dim - 1))]
         negative = [-1.0, *([0.0] * (self.dim - 1))]
+        deleted = False
         try:
             self._upsert_live_ann_probe(probe_id, positive)
             self._wait_for_live_ann(probe_id, positive, present=True, phase="insert")
             self._upsert_live_ann_probe(probe_id, negative)
             self._wait_for_live_ann(probe_id, negative, present=True, phase="update")
+            self._wait_for_live_ann(probe_id, positive, present=False, phase="update replacement")
             self.client.delete_documents(self.index_name, [probe_id])
+            deleted = True
             self._wait_for_live_ann(probe_id, negative, present=False, phase="delete")
         except Exception as exc:  # noqa: BLE001
             msg = f"TreeDB live-ANN preflight failed on selected route {self._selected_ann_route()}: {exc}"
             raise RuntimeError(msg) from exc
+        finally:
+            if not deleted:
+                try:
+                    self.client.delete_documents(self.index_name, [probe_id])
+                except Exception:  # noqa: BLE001
+                    log.warning("TreeDB live-ANN preflight probe cleanup failed", exc_info=True)
 
     def _selected_ann_route(self) -> str:
         strategy = getattr(getattr(self, "db_case_config", None), "strategy", "unknown")
@@ -233,12 +247,12 @@ class TreeDB(VectorDB):
         live = diagnostics.get("live_ann")
         if not isinstance(live, dict) or live.get("enabled") is not True:
             raise RuntimeError("TreeDB live-ANN preflight response is missing live mutation counters")
+        if not isinstance(live.get("selected_route"), str) or not live["selected_route"]:
+            raise RuntimeError("TreeDB live-ANN preflight response is missing selected-route proof")
         if int(live.get("exact_fallbacks", -1)) != 0:
             raise RuntimeError("TreeDB live-ANN preflight used an exact fallback")
         if int(live.get("full_rebuilds", -1)) != 0:
             raise RuntimeError("TreeDB live-ANN preflight performed a full rebuild")
-        if "base_candidates" not in live or "delta_candidates" not in live:
-            raise RuntimeError("TreeDB live-ANN preflight response is missing base/delta counters")
 
     def search_embedding(self, query: list[float], k: int = 100, **kwargs: Any) -> list[int]:
         if self._search_param.get("use_vector_index"):
@@ -280,6 +294,14 @@ class TreeDB(VectorDB):
         raise ValueError(msg)
 
     def _validate_config_shape(self) -> None:
+        if not math.isfinite(getattr(self, "live_ann_visibility_timeout", 5.0)) or getattr(
+            self, "live_ann_visibility_timeout", 5.0
+        ) <= 0:
+            raise ValueError("TreeDB live_ann_visibility_timeout must be > 0")
+        if not math.isfinite(getattr(self, "live_ann_visibility_poll_interval", 0.05)) or getattr(
+            self, "live_ann_visibility_poll_interval", 0.05
+        ) < 0:
+            raise ValueError("TreeDB live_ann_visibility_poll_interval must be >= 0")
         if self.query_embedding_encoding not in _QUERY_EMBEDDING_ENCODINGS:
             msg = f"TreeDB query_embedding_encoding={self.query_embedding_encoding!r} is not supported"
             raise ValueError(msg)
