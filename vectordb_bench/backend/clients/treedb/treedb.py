@@ -290,13 +290,15 @@ class TreeDB(VectorDB):
         diagnostics: bool = False,
         request_timeout: float | None = None,
     ):
+        strategy = getattr(getattr(self, "db_case_config", None), "strategy", "column_graph")
+        probe_stats_mode = "production" if strategy == "native_runtime" else "full_diagnostics"
         search_options = {
             "ef_search": self._search_param.get("ef_search") or None,
             "query_mode": self._search_param.get("query_mode") or None,
             "quantized_index_name": self._search_param.get("quantized_index_name") or None,
             "quantized_rerank_candidates": self._search_param.get("quantized_rerank_candidates") or None,
             "query_embedding_encoding": self.query_embedding_encoding,
-            "stats_mode": "full_diagnostics" if diagnostics else self.stats_mode,
+            "stats_mode": probe_stats_mode if diagnostics else self.stats_mode,
         }
         if not diagnostics and self.response_format == "ids":
             search_options["response_format"] = "ids"
