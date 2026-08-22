@@ -1,4 +1,5 @@
 import logging
+import threading
 from contextlib import contextmanager
 from typing import Any
 
@@ -21,7 +22,10 @@ _QUERY_EMBEDDING_ENCODINGS = ("json", "f32_le_b64", "f32_le")
 
 class TreeDB(VectorDB):
     supported_filter_types: list[FilterOp] = [FilterOp.NonFilter]
-    thread_safe: bool = False
+    # ConcurrentInsertRunner gives every worker its own init() scope and this
+    # adapter keeps the resulting client in thread-local state.
+    thread_safe: bool = True
+    worker_owned_clients: bool = True
 
     def __init__(
         self,
@@ -43,6 +47,7 @@ class TreeDB(VectorDB):
         self.stats_mode = db_config.get("stats_mode", "full_diagnostics")
         self.response_format = db_config.get("response_format", "full")
         self._client = None
+        self._clients = threading.local()
         self._search_param = db_case_config.search_param()
         self._metric = self._parse_metric(db_case_config.metric_type)
         self._vector_index_options = (
@@ -75,28 +80,47 @@ class TreeDB(VectorDB):
     def __getstate__(self):
         state = self.__dict__.copy()
         state["_client"] = None
+        state.pop("_clients", None)
         return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self._clients = threading.local()
 
     def _new_client(self):
         from treedb_client import TreeDBClient
 
         return TreeDBClient(self.base_url, timeout=self.timeout)
 
+    def _thread_clients(self):
+        clients = getattr(self, "_clients", None)
+        if clients is None:
+            clients = threading.local()
+            self._clients = clients
+        return clients
+
     @contextmanager
     def init(self):
         client = self._new_client()
-        self._client = client
+        clients = self._thread_clients()
+        clients.client = client
         try:
             yield
         finally:
-            self._client = None
+            if getattr(clients, "client", None) is client:
+                del clients.client
             _close_client(client)
 
     @property
     def client(self):
-        if self._client is None:
-            self._client = self._new_client()
-        return self._client
+        clients = self._thread_clients()
+        client = getattr(clients, "client", None)
+        if client is None:
+            client = getattr(self, "_client", None)
+            if client is None:
+                client = self._new_client()
+                clients.client = client
+        return client
 
     def insert_embeddings(
         self,
