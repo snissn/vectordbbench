@@ -189,10 +189,11 @@ Run a TreeDB streaming case with `--use-vector-index` and retain the command out
 ```shell
 vectordbbench TreeDBHNSW --help
 vectordbbench TreeDBHNSW --base-url http://127.0.0.1:7120 --use-vector-index \
-  --strategy native_runtime --live-ann-visibility-timeout 5
+  --strategy native_runtime --stats-mode production --response-format ids \
+  --skip-vector-index-guards --live-ann-visibility-timeout 5
 ```
 
-The current TreeDB main service is expected to fail this preflight: its mutable `native_runtime` route is not exposed through `/search/vector-index`, while the `column_graph` route is bulk-rebuild based. Preserve that explicit failure as the HB0-HB2 baseline; do not add an optimize/rebuild between probe mutations.
+Current TreeDB exposes mutable `native_runtime` search through `/search/vector-index`; the production/full-response preflight proves that route before compact timed searches. Older services fail closed at this boundary. Do not add an optimize/rebuild between probe mutations.
 
 ### Run VectorChord (vchordrq) from command line
 
