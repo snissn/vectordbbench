@@ -35,10 +35,7 @@ def test_treedb_concurrent_insert_uses_and_closes_distinct_worker_clients(monkey
             import pandas as pd
 
             return iter(
-                [
-                    pd.DataFrame({"id": [row_id], "vector": [np.array([float(row_id), 1.0])]})
-                    for row_id in range(2)
-                ]
+                [pd.DataFrame({"id": [row_id], "vector": [np.array([float(row_id), 1.0])]}) for row_id in range(2)]
             )
 
     clients = []
@@ -102,7 +99,9 @@ def test_treedb_async_insert_clamps_to_one_thread_local_worker() -> None:
 
     db = object.__new__(TreeDB)
     db.name = "TreeDB"
-    runner = ConcurrentInsertRunner(db, SimpleNamespace(), normalize=False, max_workers=4, backend=ExecutorBackend.ASYNC)
+    runner = ConcurrentInsertRunner(
+        db, SimpleNamespace(), normalize=False, max_workers=4, backend=ExecutorBackend.ASYNC
+    )
 
     assert runner.load_concurrency == {"requested": 4, "effective": 1}
 
