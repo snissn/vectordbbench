@@ -753,10 +753,11 @@ def test_treedb_live_ann_preflight_requires_live_mutation_counters() -> None:
 
 def test_treedb_live_ann_preflight_proves_insert_update_and_delete() -> None:
     probe = SimpleNamespace(id="__vectordbbench_live_ann_probe__")
-    live = {"enabled": True, "selected_route": "mutable_native", "exact_fallbacks": 0, "full_rebuilds": 0}
+    anchor = SimpleNamespace(id="__vectordbbench_live_ann_anchor__")
+    live = {"enabled": True, "exact_fallbacks": 0, "full_rebuilds": 0}
     responses = [
         _result_response(
-            results=[probe],
+            results=[anchor],
             diagnostics={
                 "route": "exact_hnsw_search_pack_v1",
                 "fallback_reason": "none",
@@ -772,12 +773,16 @@ def test_treedb_live_ann_preflight_proves_insert_update_and_delete() -> None:
             }
         ),
         _result_response(
-            results=[],
+            results=[probe],
             diagnostics={
                 "route": "exact_hnsw_search_pack_v1",
                 "fallback_reason": "none",
                 "live_ann": live,
             },
+        ),
+        _result_response(
+            results=[anchor],
+            diagnostics={"route": "exact_hnsw_search_pack_v1", "fallback_reason": "none", "live_ann": live},
         ),
         _result_response(
             results=[],
@@ -801,8 +806,10 @@ def test_treedb_live_ann_preflight_proves_insert_update_and_delete() -> None:
 
 def test_treedb_live_ann_preflight_rejects_update_visible_at_old_vector() -> None:
     probe = SimpleNamespace(id="__vectordbbench_live_ann_probe__")
-    live = {"enabled": True, "selected_route": "mutable_native", "exact_fallbacks": 0, "full_rebuilds": 0}
+    anchor = SimpleNamespace(id="__vectordbbench_live_ann_anchor__")
+    live = {"enabled": True, "exact_fallbacks": 0, "full_rebuilds": 0}
     responses = [
+        _result_response(results=[anchor], diagnostics={"route": "exact_hnsw_search_pack_v1", "fallback_reason": "none", "live_ann": live}),
         _result_response(results=[probe], diagnostics={"route": "exact_hnsw_search_pack_v1", "fallback_reason": "none", "live_ann": live}),
         _result_response(results=[probe], diagnostics={"route": "exact_hnsw_search_pack_v1", "fallback_reason": "none", "live_ann": live}),
         _result_response(results=[probe], diagnostics={"route": "exact_hnsw_search_pack_v1", "fallback_reason": "none", "live_ann": live}),
@@ -820,9 +827,9 @@ def test_treedb_live_ann_preflight_rejects_update_visible_at_old_vector() -> Non
     db._client.delete_documents = lambda *args, **kwargs: deleted.append(args[1])
     db._client.search_vector_index = lambda *args, **kwargs: responses.pop(0)
 
-    with pytest.raises(RuntimeError, match="update replacement.*not absent"):
+    with pytest.raises(RuntimeError, match="update replacement.*not visible"):
         db.preflight_live_ann()
-    assert deleted == [["__vectordbbench_live_ann_probe__"]]
+    assert deleted == [["__vectordbbench_live_ann_probe__", "__vectordbbench_live_ann_anchor__"]]
 
 
 def test_treedb_live_ann_preflight_cleans_up_after_search_failure() -> None:
@@ -841,7 +848,18 @@ def test_treedb_live_ann_preflight_cleans_up_after_search_failure() -> None:
 
     with pytest.raises(RuntimeError, match="search failed"):
         db.preflight_live_ann()
-    assert deleted == [["__vectordbbench_live_ann_probe__"]]
+    assert deleted == [["__vectordbbench_live_ann_probe__", "__vectordbbench_live_ann_anchor__"]]
+
+
+def test_treedb_live_ann_preflight_requires_two_dimensions() -> None:
+    db = _tree_db_for_response(
+        {"use_vector_index": True, "query_mode": "exact", "ef_search": 64, "require_vector_index_guards": True},
+        _result_response(),
+    )
+    db.dim = 1
+
+    with pytest.raises(RuntimeError, match="dim >= 2"):
+        db.preflight_live_ann()
 
 
 def test_treedb_live_ann_preflight_names_unsupported_selected_route() -> None:

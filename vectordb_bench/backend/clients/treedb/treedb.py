@@ -186,31 +186,34 @@ class TreeDB(VectorDB):
         """
         if not self._search_param.get("use_vector_index"):
             raise RuntimeError("TreeDB live-ANN preflight requires the vector-index route")
+        if self.dim < 2:
+            raise RuntimeError("TreeDB live-ANN preflight requires dim >= 2 for replacement visibility")
         if not callable(getattr(self.client, "delete_documents", None)):
             raise RuntimeError("TreeDB live-ANN preflight requires delete_documents support")
 
         probe_id = "__vectordbbench_live_ann_probe__"
+        anchor_id = "__vectordbbench_live_ann_anchor__"
         positive = [1.0, *([0.0] * (self.dim - 1))]
         negative = [-1.0, *([0.0] * (self.dim - 1))]
-        deleted = False
+        anchor = [0.0, 1.0, *([0.0] * (self.dim - 2))]
         try:
+            self._upsert_live_ann_probe(anchor_id, anchor)
+            self._wait_for_live_ann(anchor_id, anchor, present=True, phase="anchor insert")
             self._upsert_live_ann_probe(probe_id, positive)
             self._wait_for_live_ann(probe_id, positive, present=True, phase="insert")
             self._upsert_live_ann_probe(probe_id, negative)
             self._wait_for_live_ann(probe_id, negative, present=True, phase="update")
-            self._wait_for_live_ann(probe_id, positive, present=False, phase="update replacement")
+            self._wait_for_live_ann(anchor_id, positive, present=True, phase="update replacement")
             self.client.delete_documents(self.index_name, [probe_id])
-            deleted = True
             self._wait_for_live_ann(probe_id, negative, present=False, phase="delete")
         except Exception as exc:  # noqa: BLE001
             msg = f"TreeDB live-ANN preflight failed on selected route {self._selected_ann_route()}: {exc}"
             raise RuntimeError(msg) from exc
         finally:
-            if not deleted:
-                try:
-                    self.client.delete_documents(self.index_name, [probe_id])
-                except Exception:  # noqa: BLE001
-                    log.warning("TreeDB live-ANN preflight probe cleanup failed", exc_info=True)
+            try:
+                self.client.delete_documents(self.index_name, [probe_id, anchor_id])
+            except Exception:  # noqa: BLE001
+                log.warning("TreeDB live-ANN preflight probe cleanup failed", exc_info=True)
 
     def _selected_ann_route(self) -> str:
         strategy = getattr(getattr(self, "db_case_config", None), "strategy", "unknown")
@@ -247,7 +250,7 @@ class TreeDB(VectorDB):
         live = diagnostics.get("live_ann")
         if not isinstance(live, dict) or live.get("enabled") is not True:
             raise RuntimeError("TreeDB live-ANN preflight response is missing live mutation counters")
-        if not isinstance(live.get("selected_route"), str) or not live["selected_route"]:
+        if not isinstance(diagnostics.get("route"), str) or not diagnostics["route"]:
             raise RuntimeError("TreeDB live-ANN preflight response is missing selected-route proof")
         if int(live.get("exact_fallbacks", -1)) != 0:
             raise RuntimeError("TreeDB live-ANN preflight used an exact fallback")
