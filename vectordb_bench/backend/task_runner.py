@@ -335,6 +335,9 @@ class CaseRunner(BaseModel):
     def _run_streaming_case(self) -> Metric:
         log.info("Start streaming case")
         try:
+            if self.db.name == "TreeDB":
+                with self.db.init():
+                    self.db.preflight_live_ann()
             self._init_read_write_runner()
             m = self.read_write_runner.run_read_write()
         except Exception as e:

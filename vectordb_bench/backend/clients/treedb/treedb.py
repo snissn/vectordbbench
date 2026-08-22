@@ -1,6 +1,7 @@
 import base64
 import logging
 import threading
+import time
 from contextlib import contextmanager
 from typing import Any
 
@@ -52,6 +53,8 @@ class TreeDB(VectorDB):
         self.query_embedding_encoding = db_config.get("query_embedding_encoding", "json")
         self.stats_mode = db_config.get("stats_mode", "full_diagnostics")
         self.response_format = db_config.get("response_format", "full")
+        self.live_ann_visibility_timeout = db_config.get("live_ann_visibility_timeout", 5.0)
+        self.live_ann_visibility_poll_interval = db_config.get("live_ann_visibility_poll_interval", 0.05)
         self._client = None
         self._clients = threading.local()
         self._search_param = db_case_config.search_param()
@@ -170,19 +173,76 @@ class TreeDB(VectorDB):
     def optimize(self, data_size: int | None = None):
         self.client.optimize_index(self.index_name)
 
+    def preflight_live_ann(self) -> None:
+        """Prove one insert, update, and delete reaches the selected ANN route.
+
+        This deliberately does not call optimize: a rebuild makes this a bulk
+        benchmark, not a live-ANN one.
+        """
+        if not self._search_param.get("use_vector_index"):
+            raise RuntimeError("TreeDB live-ANN preflight requires the vector-index route")
+        if not callable(getattr(self.client, "delete_documents", None)):
+            raise RuntimeError("TreeDB live-ANN preflight requires delete_documents support")
+
+        probe_id = "__vectordbbench_live_ann_probe__"
+        positive = [1.0, *([0.0] * (self.dim - 1))]
+        negative = [-1.0, *([0.0] * (self.dim - 1))]
+        try:
+            self._upsert_live_ann_probe(probe_id, positive)
+            self._wait_for_live_ann(probe_id, positive, present=True, phase="insert")
+            self._upsert_live_ann_probe(probe_id, negative)
+            self._wait_for_live_ann(probe_id, negative, present=True, phase="update")
+            self.client.delete_documents(self.index_name, [probe_id])
+            self._wait_for_live_ann(probe_id, negative, present=False, phase="delete")
+        except Exception as exc:  # noqa: BLE001
+            msg = f"TreeDB live-ANN preflight failed on selected route {self._selected_ann_route()}: {exc}"
+            raise RuntimeError(msg) from exc
+
+    def _selected_ann_route(self) -> str:
+        strategy = getattr(getattr(self, "db_case_config", None), "strategy", "unknown")
+        return f"strategy={strategy}, mode={self._search_param.get('query_mode') or 'exact'}"
+
+    def _upsert_live_ann_probe(self, probe_id: str, embedding: list[float]) -> None:
+        if self.document_embedding_encoding == "f32_le_b64":
+            document = {
+                "id": probe_id,
+                "embedding_f32_le_b64": base64.b64encode(np.asarray(embedding, dtype="<f4")).decode("ascii"),
+            }
+        else:
+            from treedb_client import Document
+
+            document = Document(id=probe_id, embedding=embedding)
+        self.client.upsert_documents(self.index_name, [document], defer_vector_index_rebuild=True)
+
+    def _wait_for_live_ann(self, probe_id: str, query: list[float], *, present: bool, phase: str) -> None:
+        deadline = time.perf_counter() + self.live_ann_visibility_timeout
+        while True:
+            response = self._search_vector_index(query, 1)
+            self._validate_live_ann_response(response)
+            ids = _response_ids(response)
+            if (probe_id in ids) is present:
+                return
+            if time.perf_counter() >= deadline:
+                expectation = "visible" if present else "absent"
+                msg = f"TreeDB live-ANN {phase} probe was not {expectation} before the visibility deadline"
+                raise RuntimeError(msg)
+            time.sleep(self.live_ann_visibility_poll_interval)
+
+    def _validate_live_ann_response(self, response: Any) -> None:
+        diagnostics = getattr(response, "diagnostics", {}) or {}
+        live = diagnostics.get("live_ann")
+        if not isinstance(live, dict) or live.get("enabled") is not True:
+            raise RuntimeError("TreeDB live-ANN preflight response is missing live mutation counters")
+        if int(live.get("exact_fallbacks", -1)) != 0:
+            raise RuntimeError("TreeDB live-ANN preflight used an exact fallback")
+        if int(live.get("full_rebuilds", -1)) != 0:
+            raise RuntimeError("TreeDB live-ANN preflight performed a full rebuild")
+        if "base_candidates" not in live or "delta_candidates" not in live:
+            raise RuntimeError("TreeDB live-ANN preflight response is missing base/delta counters")
+
     def search_embedding(self, query: list[float], k: int = 100, **kwargs: Any) -> list[int]:
         if self._search_param.get("use_vector_index"):
-            search_options = {
-                "ef_search": self._search_param.get("ef_search") or None,
-                "query_mode": self._search_param.get("query_mode") or None,
-                "quantized_index_name": self._search_param.get("quantized_index_name") or None,
-                "quantized_rerank_candidates": self._search_param.get("quantized_rerank_candidates") or None,
-                "query_embedding_encoding": self.query_embedding_encoding,
-                "stats_mode": self.stats_mode,
-            }
-            if self.response_format == "ids":
-                search_options["response_format"] = "ids"
-            result = self.client.search_vector_index(self.index_name, query, k, **search_options)
+            result = self._search_vector_index(query, k)
             if self._search_param.get("require_vector_index_guards", True):
                 self._validate_vector_index_response(result)
             if self.response_format == "ids":
@@ -190,6 +250,19 @@ class TreeDB(VectorDB):
             return [int(item.id) for item in result.results]
         result = self.client.query_by_embedding(self.index_name, query, k)
         return [int(doc.id) for doc in result.documents]
+
+    def _search_vector_index(self, query: list[float], k: int):
+        search_options = {
+            "ef_search": self._search_param.get("ef_search") or None,
+            "query_mode": self._search_param.get("query_mode") or None,
+            "quantized_index_name": self._search_param.get("quantized_index_name") or None,
+            "quantized_rerank_candidates": self._search_param.get("quantized_rerank_candidates") or None,
+            "query_embedding_encoding": self.query_embedding_encoding,
+            "stats_mode": self.stats_mode,
+        }
+        if self.response_format == "ids":
+            search_options["response_format"] = "ids"
+        return self.client.search_vector_index(self.index_name, query, k, **search_options)
 
     def prepare_filter(self, filters: Filter):
         if filters.type != FilterOp.NonFilter:
@@ -364,6 +437,12 @@ def _int_stat(stats: dict, name: str) -> int:
     if isinstance(value, (int, float)):
         return int(value)
     return 0
+
+
+def _response_ids(response: Any) -> list[str]:
+    if hasattr(response, "ids"):
+        return [str(value) for value in response.ids]
+    return [str(item.id) for item in getattr(response, "results", [])]
 
 
 def _close_client(client: Any) -> None:

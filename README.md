@@ -180,6 +180,20 @@ Options:
   --help                          Show this message and exit.
 ```
 
+### TreeDB live-ANN streaming preflight
+
+TreeDB streaming cases first insert, update, and delete one deterministic probe without calling `optimize`. The probe runs before the existing timed runner, so its client work is not attributed to insert/search measurements. Each probe must become visible (or absent after delete) through the configured no-document ANN route within `--live-ann-visibility-timeout`; route responses must report `live_ann.enabled`, base/delta candidates, and zero exact fallbacks and full rebuilds. Missing counters, an unsupported selected route (including current `native_runtime` no-document search), stale results, or a backlog/error abort the run rather than producing zero-valued metrics.
+
+Run a TreeDB streaming case with `--use-vector-index` and retain the command output. For example, use the existing command help to select `StreamingPerformanceCase` at 500 or 1000 vectors/s:
+
+```shell
+vectordbbench TreeDBHNSW --help
+vectordbbench TreeDBHNSW --base-url http://127.0.0.1:7120 --use-vector-index \
+  --strategy native_runtime --live-ann-visibility-timeout 5
+```
+
+The current TreeDB main service is expected to fail this preflight: its mutable `native_runtime` route is not exposed through `/search/vector-index`, while the `column_graph` route is bulk-rebuild based. Preserve that explicit failure as the HB0-HB2 baseline; do not add an optimize/rebuild between probe mutations.
+
 ### Run VectorChord (vchordrq) from command line
 
 VectorChord is a PostgreSQL extension for scalable vector similarity search using IVF + RaBitQ indexing.

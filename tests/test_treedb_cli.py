@@ -239,6 +239,8 @@ def test_treedb_config_to_dict_and_case_config_scalar_u8_rerank() -> None:
         "query_embedding_encoding": "f32_le_b64",
         "stats_mode": "full_diagnostics",
         "response_format": "full",
+        "live_ann_visibility_timeout": 5.0,
+        "live_ann_visibility_poll_interval": 0.05,
     }
 
     case = TreeDBHNSWConfig(
@@ -731,6 +733,83 @@ def test_treedb_exact_vector_index_response_guard_allows_exact_route() -> None:
     )
 
     assert db.search_embedding([1.0, 0.0], 1) == [7]
+
+
+def test_treedb_live_ann_preflight_requires_live_mutation_counters() -> None:
+    db = _tree_db_for_response(
+        {"use_vector_index": True, "query_mode": "exact", "ef_search": 64, "require_vector_index_guards": True},
+        _result_response(),
+    )
+    db.dim = 2
+    db.document_embedding_encoding = "f32_le_b64"
+    db.live_ann_visibility_timeout = 0.01
+    db.live_ann_visibility_poll_interval = 0
+    db._client.upsert_documents = lambda *args, **kwargs: SimpleNamespace(upserted=1)
+    db._client.delete_documents = lambda *args, **kwargs: SimpleNamespace(deleted=1)
+
+    with pytest.raises(RuntimeError, match="live mutation counters"):
+        db.preflight_live_ann()
+
+
+def test_treedb_live_ann_preflight_proves_insert_update_and_delete() -> None:
+    probe = SimpleNamespace(id="__vectordbbench_live_ann_probe__")
+    responses = [
+        _result_response(
+            results=[probe],
+            diagnostics={
+                "route": "exact_hnsw_search_pack_v1",
+                "fallback_reason": "none",
+                "live_ann": {"enabled": True, "base_candidates": 1, "delta_candidates": 1, "exact_fallbacks": 0, "full_rebuilds": 0},
+            }
+        ),
+        _result_response(
+            results=[probe],
+            diagnostics={
+                "route": "exact_hnsw_search_pack_v1",
+                "fallback_reason": "none",
+                "live_ann": {"enabled": True, "base_candidates": 1, "delta_candidates": 1, "exact_fallbacks": 0, "full_rebuilds": 0},
+            }
+        ),
+        _result_response(
+            results=[],
+            diagnostics={
+                "route": "exact_hnsw_search_pack_v1",
+                "fallback_reason": "none",
+                "live_ann": {"enabled": True, "base_candidates": 1, "delta_candidates": 1, "exact_fallbacks": 0, "full_rebuilds": 0},
+            },
+        ),
+    ]
+    db = _tree_db_for_response(
+        {"use_vector_index": True, "query_mode": "exact", "ef_search": 64, "require_vector_index_guards": True},
+        responses[0],
+    )
+    db.dim = 2
+    db.document_embedding_encoding = "f32_le_b64"
+    db.live_ann_visibility_timeout = 0.01
+    db.live_ann_visibility_poll_interval = 0
+    db._client.upsert_documents = lambda *args, **kwargs: SimpleNamespace(upserted=1)
+    db._client.delete_documents = lambda *args, **kwargs: SimpleNamespace(deleted=1)
+    db._client.search_vector_index = lambda *args, **kwargs: responses.pop(0)
+
+    db.preflight_live_ann()
+
+
+def test_treedb_live_ann_preflight_names_unsupported_selected_route() -> None:
+    db = _tree_db_for_response(
+        {"use_vector_index": True, "query_mode": "exact", "ef_search": 64, "require_vector_index_guards": True},
+        _result_response(),
+    )
+    db.dim = 2
+    db.document_embedding_encoding = "f32_le_b64"
+    db.live_ann_visibility_timeout = 0.01
+    db.live_ann_visibility_poll_interval = 0
+    db.db_case_config = SimpleNamespace(strategy="native_runtime")
+    db._client.upsert_documents = lambda *args, **kwargs: SimpleNamespace(upserted=1)
+    db._client.delete_documents = lambda *args, **kwargs: SimpleNamespace(deleted=1)
+    db._client.search_vector_index = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("unsupported"))
+
+    with pytest.raises(RuntimeError, match="strategy=native_runtime.*unsupported"):
+        db.preflight_live_ann()
 
 
 @pytest.mark.parametrize("encoding", ["f32_le_b64", "f32_le"])

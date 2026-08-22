@@ -193,7 +193,7 @@ class ReadWriteRunner(MultiProcessingSearchRunner, RatedMultiThreadingInsertRunn
                 except Exception as e:
                     log.warning(f"Read and write error: {e}")
                     executor.shutdown(wait=True, cancel_futures=True)
-                    # raise e
+                    raise
         m.st_ideal_insert_duration = math.ceil(self.data_volume / self.insert_rate)
         log.info(f"Concurrent read write all done, results: {m}")
         return m
@@ -290,6 +290,7 @@ class ReadWriteRunner(MultiProcessingSearchRunner, RatedMultiThreadingInsertRunn
                     log.warning(f"Skip concurrent tests, each_conc_search_dur={each_conc_search_dur} less than 10s.")
             except Exception as e:
                 log.warning(f"Streaming Search Failed at stage={stage}. Exception: {e}")
+                raise
             result.append(
                 (
                     perc,

@@ -13,6 +13,8 @@ class TreeDBConfig(DBConfig):
     query_embedding_encoding: str = "json"
     stats_mode: str = "full_diagnostics"
     response_format: str = "full"
+    live_ann_visibility_timeout: float = 5.0
+    live_ann_visibility_poll_interval: float = 0.05
 
     def to_dict(self) -> dict:
         return {
@@ -23,6 +25,8 @@ class TreeDBConfig(DBConfig):
             "query_embedding_encoding": self.query_embedding_encoding,
             "stats_mode": self.stats_mode,
             "response_format": self.response_format,
+            "live_ann_visibility_timeout": self.live_ann_visibility_timeout,
+            "live_ann_visibility_poll_interval": self.live_ann_visibility_poll_interval,
         }
 
 

@@ -129,19 +129,17 @@ class RatedMultiThreadingInsertRunner:
 
                 while True:
                     if len(self.executing_futures) > 200:
-                        log.warning("Skip data insertion this round. There are 200+ unfinished insertion tasks.")
-                    else:
-                        finished, elapsed_time = submit_by_rate()
-                        if finished is True:
-                            log.info(
-                                f"End of dataset, left unfinished={len(self.executing_futures)}, num_round={round_idx}"
-                            )
-                            break
-                        if elapsed_time >= 1.5:
-                            log.warning(
-                                f"Submit insert tasks took {elapsed_time}s, expected 1s, "
-                                f"indicating potential resource limitations on the client machine.",
-                            )
+                        msg = f"Fixed-rate insert backlog exceeded 200 unfinished tasks: {len(self.executing_futures)}"
+                        raise RuntimeError(msg)
+                    finished, elapsed_time = submit_by_rate()
+                    if finished is True:
+                        log.info(f"End of dataset, left unfinished={len(self.executing_futures)}, num_round={round_idx}")
+                        break
+                    if elapsed_time >= 1.5:
+                        log.warning(
+                            f"Submit insert tasks took {elapsed_time}s, expected 1s, "
+                            f"indicating potential resource limitations on the client machine.",
+                        )
 
                     check_and_send_signal(wait_interval=0.001, finished=False)
                     dur = time.perf_counter() - start_time - round_idx * time_per_batch
