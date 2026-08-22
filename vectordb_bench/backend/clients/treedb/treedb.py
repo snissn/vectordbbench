@@ -100,10 +100,10 @@ class TreeDB(VectorDB):
         self.__dict__.update(state)
         self._clients = threading.local()
 
-    def _new_client(self):
+    def _new_client(self, timeout: float | None = None):
         from treedb_client import TreeDBClient
 
-        return TreeDBClient(self.base_url, timeout=self.timeout)
+        return TreeDBClient(self.base_url, timeout=self.timeout if timeout is None else timeout)
 
     def _thread_clients(self):
         clients = getattr(self, "_clients", None)
@@ -241,43 +241,29 @@ class TreeDB(VectorDB):
     def _wait_for_live_ann(self, probe_id: str, query: list[float], *, present: bool, phase: str) -> None:
         deadline = time.perf_counter() + self.live_ann_visibility_timeout
         while True:
-            response = self._search_vector_index(query, 1, diagnostics=True)
-            self._validate_live_ann_response(response)
-            ids = _response_ids(response)
-            if (probe_id in ids) is present:
-                return
             remaining = deadline - time.perf_counter()
             if remaining <= 0:
                 expectation = "visible" if present else "absent"
                 msg = f"TreeDB live-ANN {phase} probe was not {expectation} before the visibility deadline"
                 raise RuntimeError(msg)
+            response = self._search_vector_index(query, 1, diagnostics=True, request_timeout=remaining)
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                expectation = "visible" if present else "absent"
+                msg = f"TreeDB live-ANN {phase} probe was not {expectation} before the visibility deadline"
+                raise RuntimeError(msg)
+            self._validate_live_ann_response(response)
+            ids = _response_ids(response)
+            if (probe_id in ids) is present:
+                return
             time.sleep(min(self.live_ann_visibility_poll_interval, remaining))
 
     def _validate_live_ann_response(self, response: Any) -> None:
-        mode = self._search_param.get("query_mode") or "exact"
-        stats = getattr(response, "stats", {}) or {}
+        self._validate_vector_index_response(response)
         diagnostics = getattr(response, "diagnostics", {}) or {}
         live = diagnostics.get("live_ann")
-        if getattr(response, "no_documents", False) is not True:
-            raise RuntimeError("TreeDB live-ANN preflight response did not use the no-document route")
-        if getattr(response, "query_mode", "") != mode:
-            got = getattr(response, "query_mode", "")
-            msg = f"TreeDB live-ANN preflight response query_mode mismatch: got {got!r}, want {mode!r}"
-            raise RuntimeError(msg)
-        if mode != "exact" and getattr(response, "quantized_index_name", "") != self._search_param.get(
-            "quantized_index_name"
-        ):
-            raise RuntimeError("TreeDB live-ANN preflight response quantized index mismatch")
-        if _int_stat(stats, "documents_fetched") != 0 or _int_stat(stats, "document_bytes") != 0:
-            raise RuntimeError("TreeDB live-ANN preflight response fetched/materialized documents")
         if not isinstance(live, dict) or live.get("enabled") is not True:
             raise RuntimeError("TreeDB live-ANN preflight response is missing live mutation counters")
-        if not isinstance(diagnostics.get("route"), str) or not diagnostics["route"]:
-            raise RuntimeError("TreeDB live-ANN preflight response is missing selected-route proof")
-        fallback_reason = str(diagnostics.get("fallback_reason") or "none")
-        if fallback_reason not in ("none", ""):
-            msg = f"TreeDB live-ANN preflight reported fallback_reason={fallback_reason!r}"
-            raise RuntimeError(msg)
         if int(live.get("exact_fallbacks", -1)) != 0:
             raise RuntimeError("TreeDB live-ANN preflight used an exact fallback")
         if int(live.get("full_rebuilds", -1)) != 0:
@@ -294,7 +280,14 @@ class TreeDB(VectorDB):
         result = self.client.query_by_embedding(self.index_name, query, k)
         return [int(doc.id) for doc in result.documents]
 
-    def _search_vector_index(self, query: list[float], k: int, *, diagnostics: bool = False):
+    def _search_vector_index(
+        self,
+        query: list[float],
+        k: int,
+        *,
+        diagnostics: bool = False,
+        request_timeout: float | None = None,
+    ):
         search_options = {
             "ef_search": self._search_param.get("ef_search") or None,
             "query_mode": self._search_param.get("query_mode") or None,
@@ -305,7 +298,13 @@ class TreeDB(VectorDB):
         }
         if not diagnostics and self.response_format == "ids":
             search_options["response_format"] = "ids"
-        return self.client.search_vector_index(self.index_name, query, k, **search_options)
+        if request_timeout is None:
+            return self.client.search_vector_index(self.index_name, query, k, **search_options)
+        client = self._new_client(request_timeout)
+        try:
+            return client.search_vector_index(self.index_name, query, k, **search_options)
+        finally:
+            _close_client(client)
 
     def prepare_filter(self, filters: Filter):
         if filters.type != FilterOp.NonFilter:
@@ -423,7 +422,11 @@ class TreeDB(VectorDB):
 
     def _validate_exact_vector_index_response(self, stats: dict, diagnostics: dict) -> None:
         route = str(diagnostics.get("route") or "")
-        if route != "exact_hnsw_search_pack_v1" and _int_stat(stats, "search_route_hnsw_search_pack") != 1:
+        strategy = getattr(getattr(self, "db_case_config", None), "strategy", "column_graph")
+        if strategy == "native_runtime":
+            if route != "native_runtime":
+                raise RuntimeError("TreeDB native_runtime row did not use the native_runtime ANN route")
+        elif route != "exact_hnsw_search_pack_v1" and _int_stat(stats, "search_route_hnsw_search_pack") != 1:
             msg = "TreeDB exact column_graph row did not use the exact FP32 hnsw_search_pack route"
             raise RuntimeError(msg)
         if _int_stat(stats, "quantized_score_calls") != 0 or _int_stat(stats, "quantized_scorer_active") != 0:

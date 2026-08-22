@@ -706,6 +706,7 @@ def _tree_db_for_response(search_param: dict, response) -> "TreeDB":
     db = object.__new__(TreeDB)
     db.index_name = "bench"
     db._client = _FakeTreeDBClient(response)
+    db._new_client = lambda _timeout=None: db._client
     db.query_embedding_encoding = "json"
     db.stats_mode = "full_diagnostics"
     db.response_format = "full"
@@ -761,12 +762,12 @@ def test_treedb_live_ann_visibility_sleep_does_not_overshoot_deadline(monkeypatc
     db._client.search_vector_index = lambda *_args, **_kwargs: _result_response(
         results=[],
         diagnostics={
-            "route": "live_native",
+            "route": "exact_hnsw_search_pack_v1",
             "fallback_reason": "none",
             "live_ann": {"enabled": True, "exact_fallbacks": 0, "full_rebuilds": 0},
         },
     )
-    clock = iter([0.0, 0.2, 1.0])
+    clock = iter([0.0, 0.1, 0.2, 1.0])
     sleeps = []
     monkeypatch.setattr("vectordb_bench.backend.clients.treedb.treedb.time.perf_counter", lambda: next(clock))
     monkeypatch.setattr("vectordb_bench.backend.clients.treedb.treedb.time.sleep", sleeps.append)
@@ -781,7 +782,7 @@ def test_treedb_live_ann_probe_forces_full_diagnostics_transport() -> None:
     response = _result_response(
         results=[SimpleNamespace(id=probe_id)],
         diagnostics={
-            "route": "live_native",
+            "route": "exact_hnsw_search_pack_v1",
             "fallback_reason": "none",
             "live_ann": {"enabled": True, "exact_fallbacks": 0, "full_rebuilds": 0},
         },
@@ -792,7 +793,7 @@ def test_treedb_live_ann_probe_forces_full_diagnostics_transport() -> None:
     )
     db.stats_mode = "production"
     db.response_format = "ids"
-    db.live_ann_visibility_timeout = 0
+    db.live_ann_visibility_timeout = 1
     db.live_ann_visibility_poll_interval = 0
 
     db._wait_for_live_ann(probe_id, [1.0, 0.0], present=True, phase="insert")
@@ -800,6 +801,47 @@ def test_treedb_live_ann_probe_forces_full_diagnostics_transport() -> None:
     options = db._client.calls[0][1]
     assert options["stats_mode"] == "full_diagnostics"
     assert "response_format" not in options
+
+
+def test_treedb_live_ann_probe_rejects_unselected_native_route() -> None:
+    db = _tree_db_for_response(
+        {"use_vector_index": True, "query_mode": "exact", "ef_search": 64},
+        _result_response(),
+    )
+    db.db_case_config = SimpleNamespace(strategy="native_runtime")
+    response = _result_response(
+        diagnostics={
+            "route": "exact_hnsw_search_pack_v1",
+            "fallback_reason": "none",
+            "live_ann": {"enabled": True, "exact_fallbacks": 0, "full_rebuilds": 0},
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="native_runtime ANN route"):
+        db._validate_live_ann_response(response)
+
+
+def test_treedb_live_ann_probe_rejects_response_after_deadline(monkeypatch: MonkeyPatch) -> None:
+    probe_id = "__vectordbbench_live_ann_probe__"
+    response = _result_response(
+        results=[SimpleNamespace(id=probe_id)],
+        diagnostics={
+            "route": "exact_hnsw_search_pack_v1",
+            "fallback_reason": "none",
+            "live_ann": {"enabled": True, "exact_fallbacks": 0, "full_rebuilds": 0},
+        },
+    )
+    db = _tree_db_for_response({"use_vector_index": True, "query_mode": "exact"}, response)
+    db.live_ann_visibility_timeout = 1
+    db.live_ann_visibility_poll_interval = 0
+    request_timeouts = []
+    db._new_client = lambda timeout=None: request_timeouts.append(timeout) or db._client
+    clock = iter([0.0, 0.1, 1.1])
+    monkeypatch.setattr("vectordb_bench.backend.clients.treedb.treedb.time.perf_counter", lambda: next(clock))
+
+    with pytest.raises(RuntimeError, match="visibility deadline"):
+        db._wait_for_live_ann(probe_id, [1.0, 0.0], present=True, phase="insert")
+    assert request_timeouts == [pytest.approx(0.9)]
 
 
 @pytest.mark.parametrize(
@@ -811,7 +853,7 @@ def test_treedb_live_ann_probe_forces_full_diagnostics_transport() -> None:
         (
             {"query_mode": "quantized_only", "quantized_index_name": "expected"},
             {"query_mode": "quantized_only", "quantized_index_name": "other"},
-            "quantized index mismatch",
+            "quantized_index_name mismatch",
         ),
     ],
 )
@@ -821,7 +863,7 @@ def test_treedb_live_ann_preflight_rejects_non_live_transport_proof(
     db = _tree_db_for_response({"use_vector_index": True, **search_param}, _result_response())
     response = _result_response(
         diagnostics={
-            "route": "live_native",
+            "route": "exact_hnsw_search_pack_v1",
             "fallback_reason": "none",
             "live_ann": {"enabled": True, "exact_fallbacks": 0, "full_rebuilds": 0},
         },
@@ -894,23 +936,23 @@ def test_treedb_live_ann_preflight_fails_when_anchor_cleanup_is_not_visible() ->
     probe = SimpleNamespace(id="__vectordbbench_live_ann_probe__")
     live = {"enabled": True, "exact_fallbacks": 0, "full_rebuilds": 0}
     responses = [
-        _result_response(results=[item], diagnostics={"route": "live", "live_ann": live})
+        _result_response(results=[item], diagnostics={"route": "exact_hnsw_search_pack_v1", "live_ann": live})
         for item in (anchor, probe, probe, anchor)
     ]
     responses.extend(
         [
-            _result_response(results=[], diagnostics={"route": "live", "live_ann": live}),
-            _result_response(results=[anchor], diagnostics={"route": "live", "live_ann": live}),
+            _result_response(results=[], diagnostics={"route": "exact_hnsw_search_pack_v1", "live_ann": live}),
+            _result_response(results=[anchor], diagnostics={"route": "exact_hnsw_search_pack_v1", "live_ann": live}),
         ]
     )
     db = _tree_db_for_response({"use_vector_index": True, "query_mode": "exact"}, responses[0])
     db.dim = 2
     db.document_embedding_encoding = "f32_le_b64"
-    db.live_ann_visibility_timeout = 0
+    db.live_ann_visibility_timeout = 0.01
     db.live_ann_visibility_poll_interval = 0
     db._client.upsert_documents = lambda *args, **kwargs: SimpleNamespace(upserted=1)
     db._client.delete_documents = lambda *args, **kwargs: SimpleNamespace(deleted=1)
-    db._client.search_vector_index = lambda *args, **kwargs: responses.pop(0)
+    db._client.search_vector_index = lambda *args, **kwargs: responses.pop(0) if len(responses) > 1 else responses[0]
 
     with pytest.raises(RuntimeError, match="cleanup.*not absent"):
         db.preflight_live_ann()
@@ -921,13 +963,13 @@ def test_treedb_live_ann_preflight_propagates_cleanup_delete_failure() -> None:
     probe = SimpleNamespace(id="__vectordbbench_live_ann_probe__")
     live = {"enabled": True, "exact_fallbacks": 0, "full_rebuilds": 0}
     responses = [
-        _result_response(results=results, diagnostics={"route": "live", "live_ann": live})
+        _result_response(results=results, diagnostics={"route": "exact_hnsw_search_pack_v1", "live_ann": live})
         for results in ([anchor], [probe], [probe], [anchor], [])
     ]
     db = _tree_db_for_response({"use_vector_index": True, "query_mode": "exact"}, responses[0])
     db.dim = 2
     db.document_embedding_encoding = "f32_le_b64"
-    db.live_ann_visibility_timeout = 0
+    db.live_ann_visibility_timeout = 1
     db.live_ann_visibility_poll_interval = 0
     db._client.upsert_documents = lambda *args, **kwargs: SimpleNamespace(upserted=1)
     deletes = []
@@ -948,7 +990,7 @@ def test_treedb_live_ann_preflight_preserves_primary_failure_over_cleanup_failur
     db = _tree_db_for_response({"use_vector_index": True, "query_mode": "exact"}, _result_response())
     db.dim = 2
     db.document_embedding_encoding = "f32_le_b64"
-    db.live_ann_visibility_timeout = 0
+    db.live_ann_visibility_timeout = 1
     db.live_ann_visibility_poll_interval = 0
     db._client.upsert_documents = lambda *args, **kwargs: SimpleNamespace(upserted=1)
     db._client.search_vector_index = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("search failed"))
@@ -986,12 +1028,12 @@ def test_treedb_live_ann_preflight_rejects_update_visible_at_old_vector() -> Non
     )
     db.dim = 2
     db.document_embedding_encoding = "f32_le_b64"
-    db.live_ann_visibility_timeout = 0
+    db.live_ann_visibility_timeout = 0.01
     db.live_ann_visibility_poll_interval = 0
     db._client.upsert_documents = lambda *args, **kwargs: SimpleNamespace(upserted=1)
     deleted = []
     db._client.delete_documents = lambda *args, **kwargs: deleted.append(args[1])
-    db._client.search_vector_index = lambda *args, **kwargs: responses.pop(0)
+    db._client.search_vector_index = lambda *args, **kwargs: responses.pop(0) if len(responses) > 1 else responses[0]
 
     with pytest.raises(RuntimeError, match="update replacement.*not visible"):
         db.preflight_live_ann()
@@ -1005,14 +1047,14 @@ def test_treedb_live_ann_preflight_rejects_canonical_fallback_reason() -> None:
     )
     db.dim = 2
     db.document_embedding_encoding = "f32_le_b64"
-    db.live_ann_visibility_timeout = 0
+    db.live_ann_visibility_timeout = 1
     db.live_ann_visibility_poll_interval = 0
     db._client.upsert_documents = lambda *args, **kwargs: SimpleNamespace(upserted=1)
     db._client.delete_documents = lambda *args, **kwargs: SimpleNamespace(deleted=1)
     db._client.search_vector_index = lambda *args, **kwargs: _result_response(
         results=[SimpleNamespace(id="__vectordbbench_live_ann_anchor__")],
         diagnostics={
-            "route": "live_native",
+            "route": "exact_hnsw_search_pack_v1",
             "fallback_reason": "exact_fallback",
             "live_ann": {"enabled": True, "exact_fallbacks": 0, "full_rebuilds": 0},
         },
