@@ -1,6 +1,8 @@
+import base64
 import pickle
 import sys
 import threading
+from contextlib import contextmanager
 from types import ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING
 
@@ -106,6 +108,43 @@ def test_treedb_async_insert_clamps_to_one_thread_local_worker() -> None:
     assert runner.load_concurrency == {"requested": 4, "effective": 1}
 
 
+@pytest.mark.parametrize("accepts_numpy_embeddings", [False, True])
+def test_concurrent_insert_runner_preserves_numpy_only_for_opted_in_db(accepts_numpy_embeddings) -> None:
+    import numpy as np
+    import pandas as pd
+
+    class Data:
+        train_id_field = "id"
+        train_vector_field = "vector"
+
+    class Dataset:
+        data = Data()
+
+        def iter_batches(self, batch_size):
+            return iter([pd.DataFrame({"id": [1], "vector": [np.array([0.1, 0.2], dtype=np.float32)]})])
+
+    class DB:
+        thread_safe = True
+        name = "fake"
+
+        def __init__(self):
+            self.accepts_numpy_embeddings = accepts_numpy_embeddings
+            self.received = None
+
+        @contextmanager
+        def init(self):
+            yield
+
+        def insert_embeddings(self, embeddings, metadata, labels_data=None):
+            self.received = embeddings
+            return len(metadata), None
+
+    db = DB()
+
+    assert ConcurrentInsertRunner(db, Dataset(), normalize=False, max_workers=1).task() == 1
+    assert isinstance(db.received, np.ndarray) is accepts_numpy_embeddings
+
+
 def test_treedb_concurrent_insert_closes_worker_clients_after_failures(monkeypatch: MonkeyPatch) -> None:
     from vectordb_bench import config
     from vectordb_bench.backend.clients.treedb.treedb import TreeDB
@@ -189,12 +228,14 @@ def test_treedb_config_to_dict_and_case_config_scalar_u8_rerank() -> None:
         base_url="http://127.0.0.1:7120",
         index_name="bench",
         timeout=5,
+        document_embedding_encoding="f32_le_b64",
         query_embedding_encoding="f32_le_b64",
     )
     assert config.to_dict() == {
         "base_url": "http://127.0.0.1:7120",
         "index_name": "bench",
         "timeout": 5,
+        "document_embedding_encoding": "f32_le_b64",
         "query_embedding_encoding": "f32_le_b64",
         "stats_mode": "full_diagnostics",
         "response_format": "full",
@@ -253,6 +294,8 @@ def test_treedb_cli_dry_run_captures_scalar_u8_rerank(monkeypatch: MonkeyPatch) 
             "32",
             "--query-embedding-encoding",
             "f32_le_b64",
+            "--document-embedding-encoding",
+            "f32_le_b64",
             "--stats-mode",
             "production",
             "--skip-load",
@@ -265,6 +308,7 @@ def test_treedb_cli_dry_run_captures_scalar_u8_rerank(monkeypatch: MonkeyPatch) 
     assert result.exit_code == 0, result.output
     assert captured["args"][0] == DB.TreeDB
     assert captured["args"][1].base_url == "http://127.0.0.1:7120"
+    assert captured["args"][1].document_embedding_encoding == "f32_le_b64"
     assert captured["args"][1].query_embedding_encoding == "f32_le_b64"
     assert captured["args"][1].stats_mode == "production"
     assert captured["args"][2].use_vector_index is True
@@ -373,6 +417,112 @@ def test_treedb_vector_index_inserts_defer_rebuild_until_optimize(monkeypatch: M
     assert count == 1
     assert calls[0][0] == "bench"
     assert calls[0][2] is True
+
+
+def test_treedb_compact_document_insert_sends_exact_f32le_bytes(monkeypatch: MonkeyPatch) -> None:
+    import numpy as np
+
+    calls = []
+
+    class NumericDocument:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("compact mode used the numeric Document path")
+
+    class FakeClient:
+        def __init__(self, base_url, timeout=30.0):
+            pass
+
+        def create_index(self, *args, **kwargs):
+            pass
+
+        def close(self):
+            pass
+
+        def upsert_documents(self, index_name, documents, *, defer_vector_index_rebuild=False):
+            calls.append((index_name, documents, defer_vector_index_rebuild))
+            return SimpleNamespace(upserted=len(documents))
+
+    fake_module = ModuleType("treedb_client")
+    fake_module.Document = NumericDocument
+    fake_module.TreeDBClient = FakeClient
+    monkeypatch.setitem(sys.modules, "treedb_client", fake_module)
+
+    from vectordb_bench.backend.clients.treedb.treedb import TreeDB
+
+    db = TreeDB(
+        dim=3,
+        db_config={
+            "base_url": "http://127.0.0.1:7120",
+            "index_name": "bench",
+            "document_embedding_encoding": "f32_le_b64",
+        },
+        db_case_config=TreeDBColumnGraphExactConfig(),
+    )
+    assert pickle.loads(pickle.dumps(db)).accepts_numpy_embeddings is True  # noqa: S301
+    embeddings = [np.arange(6, dtype=np.float64)[::2], np.array([1, -2, 3], dtype=np.int16)]
+
+    count, err = db.insert_embeddings(embeddings, [7, 9])
+
+    assert err is None
+    assert count == 2
+    assert calls[0][0] == "bench"
+    assert calls[0][2] is True
+    assert [document["id"] for document in calls[0][1]] == ["7", "9"]
+    assert all("embedding" not in document for document in calls[0][1])
+    for source, document in zip(embeddings, calls[0][1], strict=True):
+        assert base64.b64decode(document["embedding_f32_le_b64"]) == np.asarray(source, dtype="<f4").tobytes()
+
+
+@pytest.mark.parametrize("encoding", ["json", "f32_le_b64"])
+@pytest.mark.parametrize("embeddings,metadata", [([[0.1], [0.2]], [1]), ([[0.1]], [1, 2])])
+def test_treedb_insert_rejects_mismatched_embedding_metadata_counts(
+    monkeypatch: MonkeyPatch, encoding, embeddings, metadata
+) -> None:
+    class FakeClient:
+        def __init__(self, base_url, timeout=30.0):
+            pass
+
+        def create_index(self, *args, **kwargs):
+            pass
+
+        def close(self):
+            pass
+
+        def upsert_documents(self, *args, **kwargs):
+            raise AssertionError("mismatched batch reached the client")
+
+    fake_module = ModuleType("treedb_client")
+    fake_module.Document = lambda **kwargs: kwargs
+    fake_module.TreeDBClient = FakeClient
+    monkeypatch.setitem(sys.modules, "treedb_client", fake_module)
+
+    from vectordb_bench.backend.clients.treedb.treedb import TreeDB
+
+    db = TreeDB(
+        dim=1,
+        db_config={
+            "base_url": "http://127.0.0.1:7120",
+            "index_name": "bench",
+            "document_embedding_encoding": encoding,
+        },
+        db_case_config=TreeDBColumnGraphExactConfig(),
+    )
+
+    count, err = db.insert_embeddings(embeddings, metadata)
+
+    assert count == 0
+    assert isinstance(err, ValueError)
+
+
+def test_treedb_rejects_unknown_document_embedding_encoding() -> None:
+    from vectordb_bench.backend.clients.treedb.treedb import TreeDB
+
+    with pytest.raises(ValueError, match="document_embedding_encoding"):
+        TreeDB(
+            dim=2,
+            db_config={"base_url": "http://127.0.0.1:7120", "document_embedding_encoding": "raw"},
+            db_case_config=TreeDBColumnGraphExactConfig(),
+        )
 
 
 def test_treedb_named_exact_cli_uses_vector_index_guards(monkeypatch: MonkeyPatch) -> None:

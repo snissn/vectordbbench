@@ -9,6 +9,7 @@ class TreeDBConfig(DBConfig):
     base_url: str
     index_name: str = "vector_bench_test"
     timeout: float = 30.0
+    document_embedding_encoding: str = "json"
     query_embedding_encoding: str = "json"
     stats_mode: str = "full_diagnostics"
     response_format: str = "full"
@@ -18,6 +19,7 @@ class TreeDBConfig(DBConfig):
             "base_url": self.base_url,
             "index_name": self.index_name,
             "timeout": self.timeout,
+            "document_embedding_encoding": self.document_embedding_encoding,
             "query_embedding_encoding": self.query_embedding_encoding,
             "stats_mode": self.stats_mode,
             "response_format": self.response_format,
