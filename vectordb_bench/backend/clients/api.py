@@ -184,6 +184,8 @@ class VectorDB(ABC):
     thread_safe: bool = True
     # Opt in only when each concurrent insert worker must own its init() scope.
     worker_owned_clients: bool = False
+    # Opt in only when insert_embeddings accepts a stacked NumPy array.
+    accepts_numpy_embeddings: bool = False
 
     @classmethod
     def filter_supported(cls, filters: Filter) -> bool:

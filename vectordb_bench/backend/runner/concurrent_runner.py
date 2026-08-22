@@ -124,7 +124,7 @@ class ConcurrentInsertRunner:
     def _insert_batch_with_retry(
         self,
         db: api.VectorDB,
-        embeddings: list[list[float]],
+        embeddings: list[list[float]] | np.ndarray,
         metadata: list[int],
         labels_data: list[str] | None = None,
         tenant_labels_data: list[str] | None = None,
@@ -161,7 +161,7 @@ class ConcurrentInsertRunner:
 
     def _worker_insert(
         self,
-        embeddings: list[list[float]],
+        embeddings: list[list[float]] | np.ndarray,
         metadata: list[int],
         labels_data: list[str] | None = None,
         tenant_labels_data: list[str] | None = None,
@@ -181,7 +181,9 @@ class ConcurrentInsertRunner:
         with nullcontext(db) as shared_db:
             yield shared_db
 
-    def _next_batch(self) -> tuple[list[list[float]], list[int], list[str] | None, list[str] | None] | None:
+    def _next_batch(
+        self,
+    ) -> tuple[list[list[float]] | np.ndarray, list[int], list[str] | None, list[str] | None] | None:
         """Pull the next batch from the shared dataset iterator.
 
         Thread-safe: only one thread reads from the iterator at a time.
@@ -204,9 +206,8 @@ class ConcurrentInsertRunner:
         all_metadata = data_df[self.dataset.data.train_id_field].tolist()
         emb_np = np.stack(data_df[self.dataset.data.train_vector_field])
         if self.normalize:
-            all_embeddings = (emb_np / np.linalg.norm(emb_np, axis=1)[:, np.newaxis]).tolist()
-        else:
-            all_embeddings = emb_np.tolist()
+            emb_np = emb_np / np.linalg.norm(emb_np, axis=1)[:, np.newaxis]
+        all_embeddings = emb_np if getattr(self.db, "accepts_numpy_embeddings", False) else emb_np.tolist()
         del emb_np
 
         labels_data = None

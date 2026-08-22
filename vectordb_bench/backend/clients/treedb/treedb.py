@@ -1,7 +1,10 @@
+import base64
 import logging
 import threading
 from contextlib import contextmanager
 from typing import Any
+
+import numpy as np
 
 from vectordb_bench.backend.filter import Filter, FilterOp
 
@@ -18,6 +21,7 @@ _QUANTIZED_ASSET_FAILURE_STATS = (
     "quantized_asset_closed",
 )
 _QUERY_EMBEDDING_ENCODINGS = ("json", "f32_le_b64", "f32_le")
+_DOCUMENT_EMBEDDING_ENCODINGS = ("json", "f32_le_b64")
 
 
 class TreeDB(VectorDB):
@@ -43,6 +47,8 @@ class TreeDB(VectorDB):
         self.index_name = db_config.get("index_name") or collection_name
         self.base_url = db_config["base_url"]
         self.timeout = db_config.get("timeout", 30.0)
+        self.document_embedding_encoding = db_config.get("document_embedding_encoding", "json")
+        self.accepts_numpy_embeddings = self.document_embedding_encoding == "f32_le_b64"
         self.query_embedding_encoding = db_config.get("query_embedding_encoding", "json")
         self.stats_mode = db_config.get("stats_mode", "full_diagnostics")
         self.response_format = db_config.get("response_format", "full")
@@ -53,6 +59,9 @@ class TreeDB(VectorDB):
         self._vector_index_options = (
             db_case_config.index_param() if self._search_param.get("use_vector_index") else None
         )
+        if self.document_embedding_encoding not in _DOCUMENT_EMBEDDING_ENCODINGS:
+            msg = f"TreeDB document_embedding_encoding={self.document_embedding_encoding!r} is not supported"
+            raise ValueError(msg)
         self._validate_config_shape()
 
         # Do setup in __init__ with a short-lived client so the object remains
@@ -124,19 +133,30 @@ class TreeDB(VectorDB):
 
     def insert_embeddings(
         self,
-        embeddings: list[list[float]],
+        embeddings: list[list[float]] | np.ndarray,
         metadata: list[int],
         labels_data: list[str] | None = None,
         tenant_labels_data: list[str] | None = None,
         **kwargs: Any,
     ) -> tuple[int, Exception | None]:
         try:
-            from treedb_client import Document
+            if self.document_embedding_encoding == "f32_le_b64":
+                documents = [
+                    {
+                        "id": str(meta),
+                        "embedding_f32_le_b64": base64.b64encode(np.ascontiguousarray(embedding, dtype="<f4")).decode(
+                            "ascii"
+                        ),
+                    }
+                    for meta, embedding in zip(metadata, embeddings, strict=False)
+                ]
+            else:
+                from treedb_client import Document
 
-            documents = [
-                Document(id=str(meta), embedding=[float(value) for value in embedding])
-                for meta, embedding in zip(metadata, embeddings, strict=False)
-            ]
+                documents = [
+                    Document(id=str(meta), embedding=[float(value) for value in embedding])
+                    for meta, embedding in zip(metadata, embeddings, strict=False)
+                ]
             response = self.client.upsert_documents(
                 self.index_name,
                 documents,

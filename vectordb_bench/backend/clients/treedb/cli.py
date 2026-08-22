@@ -31,6 +31,16 @@ class TreeDBBaseTypedDict(CommonTypedDict):
         float,
         click.option("--timeout", type=float, help="HTTP timeout in seconds", default=30.0, show_default=True),
     ]
+    document_embedding_encoding: Annotated[
+        str,
+        click.option(
+            "--document-embedding-encoding",
+            type=click.Choice(["json", "f32_le_b64"]),
+            default="json",
+            show_default=True,
+            help="Encode loaded embeddings as JSON floats or base64 little-endian float32 bytes",
+        ),
+    ]
     strategy: Annotated[
         str,
         click.option(
@@ -203,6 +213,7 @@ def _treedb_config(parameters):
         base_url=parameters["base_url"],
         index_name=parameters["index_name"],
         timeout=parameters["timeout"],
+        document_embedding_encoding=parameters["document_embedding_encoding"],
         query_embedding_encoding=parameters["query_embedding_encoding"],
         stats_mode=parameters["stats_mode"],
         response_format=parameters["response_format"],
