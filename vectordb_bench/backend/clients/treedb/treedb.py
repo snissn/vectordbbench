@@ -252,6 +252,9 @@ class TreeDB(VectorDB):
             raise RuntimeError("TreeDB live-ANN preflight response is missing live mutation counters")
         if not isinstance(diagnostics.get("route"), str) or not diagnostics["route"]:
             raise RuntimeError("TreeDB live-ANN preflight response is missing selected-route proof")
+        fallback_reason = str(diagnostics.get("fallback_reason") or "none")
+        if fallback_reason not in ("none", ""):
+            raise RuntimeError(f"TreeDB live-ANN preflight reported fallback_reason={fallback_reason!r}")
         if int(live.get("exact_fallbacks", -1)) != 0:
             raise RuntimeError("TreeDB live-ANN preflight used an exact fallback")
         if int(live.get("full_rebuilds", -1)) != 0:

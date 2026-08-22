@@ -832,6 +832,30 @@ def test_treedb_live_ann_preflight_rejects_update_visible_at_old_vector() -> Non
     assert deleted == [["__vectordbbench_live_ann_probe__", "__vectordbbench_live_ann_anchor__"]]
 
 
+def test_treedb_live_ann_preflight_rejects_canonical_fallback_reason() -> None:
+    db = _tree_db_for_response(
+        {"use_vector_index": True, "query_mode": "exact", "ef_search": 64, "require_vector_index_guards": True},
+        _result_response(),
+    )
+    db.dim = 2
+    db.document_embedding_encoding = "f32_le_b64"
+    db.live_ann_visibility_timeout = 0
+    db.live_ann_visibility_poll_interval = 0
+    db._client.upsert_documents = lambda *args, **kwargs: SimpleNamespace(upserted=1)
+    db._client.delete_documents = lambda *args, **kwargs: SimpleNamespace(deleted=1)
+    db._client.search_vector_index = lambda *args, **kwargs: _result_response(
+        results=[SimpleNamespace(id="__vectordbbench_live_ann_anchor__")],
+        diagnostics={
+            "route": "live_native",
+            "fallback_reason": "exact_fallback",
+            "live_ann": {"enabled": True, "exact_fallbacks": 0, "full_rebuilds": 0},
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="fallback_reason='exact_fallback'"):
+        db.preflight_live_ann()
+
+
 def test_treedb_live_ann_preflight_cleans_up_after_search_failure() -> None:
     db = _tree_db_for_response(
         {"use_vector_index": True, "query_mode": "exact", "ef_search": 64, "require_vector_index_guards": True},
