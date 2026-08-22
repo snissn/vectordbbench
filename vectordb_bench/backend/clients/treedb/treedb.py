@@ -70,9 +70,7 @@ class TreeDB(VectorDB):
                     vector_index_options=self._vector_index_options,
                 )
         finally:
-            close = getattr(client, "close", None)
-            if close is not None:
-                close()
+            _close_client(client)
 
     def __getstate__(self):
         state = self.__dict__.copy()
@@ -86,14 +84,13 @@ class TreeDB(VectorDB):
 
     @contextmanager
     def init(self):
-        self._client = self._new_client()
+        client = self._new_client()
+        self._client = client
         try:
             yield
         finally:
-            close = getattr(self._client, "close", None)
-            if close is not None:
-                close()
             self._client = None
+            _close_client(client)
 
     @property
     def client(self):
@@ -180,9 +177,11 @@ class TreeDB(VectorDB):
                 msg = "TreeDB typed/binary query embedding encodings are supported only for the vector-index route"
                 raise ValueError(msg)
             if self.stats_mode != "full_diagnostics":
-                raise ValueError("TreeDB production stats mode is supported only for the vector-index route")
+                msg = "TreeDB production stats mode is supported only for the vector-index route"
+                raise ValueError(msg)
             if self.response_format == "ids":
-                raise ValueError("TreeDB compact IDs responses are supported only for the vector-index route")
+                msg = "TreeDB compact IDs responses are supported only for the vector-index route"
+                raise ValueError(msg)
             return
         if self._metric != "cosine":
             msg = "TreeDB vector-index benchmark route currently supports only cosine metric"
@@ -190,8 +189,10 @@ class TreeDB(VectorDB):
         mode = self._search_param.get("query_mode") or "exact"
         quantized_name = self._search_param.get("quantized_index_name") or ""
         rerank_candidates = int(self._search_param.get("quantized_rerank_candidates") or 0)
-        if self.response_format == "ids" and self._search_param.get("require_vector_index_guards", True):
-            msg = "TreeDB compact IDs rows require --skip-vector-index-guards after a separate full-response preflight"
+        if (self.stats_mode == "production" or self.response_format == "ids") and self._search_param.get(
+            "require_vector_index_guards", True
+        ):
+            msg = "TreeDB production transport requires --skip-vector-index-guards after a separate full-response preflight"
             raise ValueError(msg)
         if mode == "exact":
             if quantized_name or rerank_candidates:
@@ -319,3 +320,13 @@ def _int_stat(stats: dict, name: str) -> int:
     if isinstance(value, (int, float)):
         return int(value)
     return 0
+
+
+def _close_client(client: Any) -> None:
+    close = getattr(client, "close", None)
+    if close is None:
+        return
+    try:
+        close()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Failed to close TreeDB client: %s", exc)

@@ -348,6 +348,42 @@ def test_treedb_worker_lifecycle_closes_client() -> None:
     assert db._client is None
 
 
+def test_treedb_cleanup_preserves_primary_errors(monkeypatch: MonkeyPatch) -> None:
+    class FailingClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def create_index(self, *args, **kwargs) -> None:
+            msg = "create failed"
+            raise RuntimeError(msg)
+
+        def close(self) -> None:
+            msg = "close failed"
+            raise RuntimeError(msg)
+
+    fake_module = ModuleType("treedb_client")
+    fake_module.TreeDBClient = FailingClient
+    monkeypatch.setitem(sys.modules, "treedb_client", fake_module)
+
+    from vectordb_bench.backend.clients.treedb.treedb import TreeDB
+
+    with pytest.raises(RuntimeError, match="create failed"):
+        TreeDB(
+            dim=2,
+            db_config={"base_url": "http://127.0.0.1:7120"},
+            db_case_config=TreeDBHNSWConfig(),
+        )
+
+    db = object.__new__(TreeDB)
+    db._client = None
+    db._new_client = FailingClient
+    with pytest.raises(RuntimeError, match="worker failed"):
+        with db.init():
+            msg = "worker failed"
+            raise RuntimeError(msg)
+    assert db._client is None
+
+
 def _tree_db_for_response(search_param: dict, response) -> "TreeDB":
     from vectordb_bench.backend.clients.treedb.treedb import TreeDB
 
@@ -565,6 +601,11 @@ def test_treedb_config_shape_rejects_quantized_rerank_without_index() -> None:
         "quantized_rerank_candidates": 32,
     }
     db._search_param["require_vector_index_guards"] = True
+    with pytest.raises(ValueError, match="separate full-response preflight"):
+        db._validate_config_shape()
+
+    db.response_format = "full"
+    db.stats_mode = "production"
     with pytest.raises(ValueError, match="separate full-response preflight"):
         db._validate_config_shape()
 
