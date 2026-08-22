@@ -473,6 +473,47 @@ def test_treedb_compact_document_insert_sends_exact_f32le_bytes(monkeypatch: Mon
         assert base64.b64decode(document["embedding_f32_le_b64"]) == np.asarray(source, dtype="<f4").tobytes()
 
 
+@pytest.mark.parametrize("encoding", ["json", "f32_le_b64"])
+@pytest.mark.parametrize("embeddings,metadata", [([[0.1], [0.2]], [1]), ([[0.1]], [1, 2])])
+def test_treedb_insert_rejects_mismatched_embedding_metadata_counts(
+    monkeypatch: MonkeyPatch, encoding, embeddings, metadata
+) -> None:
+    class FakeClient:
+        def __init__(self, base_url, timeout=30.0):
+            pass
+
+        def create_index(self, *args, **kwargs):
+            pass
+
+        def close(self):
+            pass
+
+        def upsert_documents(self, *args, **kwargs):
+            raise AssertionError("mismatched batch reached the client")
+
+    fake_module = ModuleType("treedb_client")
+    fake_module.Document = lambda **kwargs: kwargs
+    fake_module.TreeDBClient = FakeClient
+    monkeypatch.setitem(sys.modules, "treedb_client", fake_module)
+
+    from vectordb_bench.backend.clients.treedb.treedb import TreeDB
+
+    db = TreeDB(
+        dim=1,
+        db_config={
+            "base_url": "http://127.0.0.1:7120",
+            "index_name": "bench",
+            "document_embedding_encoding": encoding,
+        },
+        db_case_config=TreeDBColumnGraphExactConfig(),
+    )
+
+    count, err = db.insert_embeddings(embeddings, metadata)
+
+    assert count == 0
+    assert isinstance(err, ValueError)
+
+
 def test_treedb_rejects_unknown_document_embedding_encoding() -> None:
     from vectordb_bench.backend.clients.treedb.treedb import TreeDB
 

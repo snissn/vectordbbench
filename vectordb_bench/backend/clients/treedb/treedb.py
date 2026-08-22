@@ -148,14 +148,14 @@ class TreeDB(VectorDB):
                             "ascii"
                         ),
                     }
-                    for meta, embedding in zip(metadata, embeddings, strict=False)
+                    for meta, embedding in zip(metadata, embeddings, strict=True)
                 ]
             else:
                 from treedb_client import Document
 
                 documents = [
                     Document(id=str(meta), embedding=[float(value) for value in embedding])
-                    for meta, embedding in zip(metadata, embeddings, strict=False)
+                    for meta, embedding in zip(metadata, embeddings, strict=True)
                 ]
             response = self.client.upsert_documents(
                 self.index_name,
