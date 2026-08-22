@@ -261,6 +261,8 @@ class TreeDB(VectorDB):
     def _validate_live_ann_response(self, response: Any) -> None:
         self._validate_vector_index_response(response)
         diagnostics = getattr(response, "diagnostics", {}) or {}
+        if not str(diagnostics.get("route") or ""):
+            raise RuntimeError("TreeDB live-ANN preflight response is missing selected-route identity")
         live = diagnostics.get("live_ann")
         if not isinstance(live, dict) or live.get("enabled") is not True:
             raise RuntimeError("TreeDB live-ANN preflight response is missing live mutation counters")

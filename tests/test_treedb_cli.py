@@ -821,6 +821,22 @@ def test_treedb_live_ann_probe_rejects_unselected_native_route() -> None:
         db._validate_live_ann_response(response)
 
 
+def test_treedb_live_ann_probe_rejects_missing_route_identity() -> None:
+    db = _tree_db_for_response(
+        {"use_vector_index": True, "query_mode": "exact", "ef_search": 64},
+        _result_response(),
+    )
+    response = _result_response(
+        diagnostics={
+            "fallback_reason": "none",
+            "live_ann": {"enabled": True, "exact_fallbacks": 0, "full_rebuilds": 0},
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="selected-route identity"):
+        db._validate_live_ann_response(response)
+
+
 def test_treedb_live_ann_probe_rejects_response_after_deadline(monkeypatch: MonkeyPatch) -> None:
     probe_id = "__vectordbbench_live_ann_probe__"
     response = _result_response(
