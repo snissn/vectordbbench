@@ -241,7 +241,7 @@ class TreeDB(VectorDB):
     def _wait_for_live_ann(self, probe_id: str, query: list[float], *, present: bool, phase: str) -> None:
         deadline = time.perf_counter() + self.live_ann_visibility_timeout
         while True:
-            response = self._search_vector_index(query, 1)
+            response = self._search_vector_index(query, 1, diagnostics=True)
             self._validate_live_ann_response(response)
             ids = _response_ids(response)
             if (probe_id in ids) is present:
@@ -294,16 +294,16 @@ class TreeDB(VectorDB):
         result = self.client.query_by_embedding(self.index_name, query, k)
         return [int(doc.id) for doc in result.documents]
 
-    def _search_vector_index(self, query: list[float], k: int):
+    def _search_vector_index(self, query: list[float], k: int, *, diagnostics: bool = False):
         search_options = {
             "ef_search": self._search_param.get("ef_search") or None,
             "query_mode": self._search_param.get("query_mode") or None,
             "quantized_index_name": self._search_param.get("quantized_index_name") or None,
             "quantized_rerank_candidates": self._search_param.get("quantized_rerank_candidates") or None,
             "query_embedding_encoding": self.query_embedding_encoding,
-            "stats_mode": self.stats_mode,
+            "stats_mode": "full_diagnostics" if diagnostics else self.stats_mode,
         }
-        if self.response_format == "ids":
+        if not diagnostics and self.response_format == "ids":
             search_options["response_format"] = "ids"
         return self.client.search_vector_index(self.index_name, query, k, **search_options)
 

@@ -27,6 +27,7 @@ def test_fixed_rate_runner_rejects_backlog_instead_of_skipping_data() -> None:
 
     with pytest.raises(RuntimeError, match="backlog exceeded 200"):
         runner.run_with_rate(None)
+    assert all(future.cancelled() for future in runner.executing_futures)
 
 
 def test_insert_backlog_wakes_waiting_streaming_search() -> None:

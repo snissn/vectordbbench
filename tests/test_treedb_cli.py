@@ -776,6 +776,32 @@ def test_treedb_live_ann_visibility_sleep_does_not_overshoot_deadline(monkeypatc
     assert sleeps == [0.8]
 
 
+def test_treedb_live_ann_probe_forces_full_diagnostics_transport() -> None:
+    probe_id = "__vectordbbench_live_ann_probe__"
+    response = _result_response(
+        results=[SimpleNamespace(id=probe_id)],
+        diagnostics={
+            "route": "live_native",
+            "fallback_reason": "none",
+            "live_ann": {"enabled": True, "exact_fallbacks": 0, "full_rebuilds": 0},
+        },
+    )
+    db = _tree_db_for_response(
+        {"use_vector_index": True, "query_mode": "exact", "ef_search": 64},
+        response,
+    )
+    db.stats_mode = "production"
+    db.response_format = "ids"
+    db.live_ann_visibility_timeout = 0
+    db.live_ann_visibility_poll_interval = 0
+
+    db._wait_for_live_ann(probe_id, [1.0, 0.0], present=True, phase="insert")
+
+    options = db._client.calls[0][1]
+    assert options["stats_mode"] == "full_diagnostics"
+    assert "response_format" not in options
+
+
 @pytest.mark.parametrize(
     ("search_param", "overrides", "match"),
     [

@@ -145,6 +145,8 @@ class RatedMultiThreadingInsertRunner:
                         unfinished = sum(not future.done() for future in self.executing_futures)
                         if unfinished > 200:
                             msg = f"Fixed-rate insert backlog exceeded 200 unfinished tasks: {unfinished}"
+                            for future in self.executing_futures:
+                                future.cancel()
                             stop_workers()
                             raise RuntimeError(msg)
                     finished, elapsed_time = submit_by_rate()
