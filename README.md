@@ -182,17 +182,18 @@ Options:
 
 ### TreeDB live-ANN streaming preflight
 
-TreeDB vector-index streaming cases first insert, replace, and delete deterministic probe and anchor records without calling `optimize`; dense TreeDB streaming keeps its existing path. The probe runs before the existing timed runner, so its client work is not attributed to insert/search measurements. The two-dimensional anchor proves replacement: the probe wins its old query before update, the anchor wins it after update, and the probe wins the new query. Each route response must report `live_ann.enabled`, the existing `diagnostics.route`, an empty or `none` `diagnostics.fallback_reason`, and zero live exact fallbacks and full rebuilds. Implementation-specific counters such as base/delta candidates are recorded when available, but are not required. Both reserved records are idempotently cleaned up. Missing route proof, an unsupported selected route (including current `native_runtime` no-document search), stale results, or a backlog/error abort the run rather than producing zero-valued metrics.
+TreeDB vector-index streaming cases first insert, replace, and delete deterministic probe and anchor records without calling `optimize`; dense TreeDB streaming keeps its existing path. The probe runs before the existing timed runner, so its client work is not attributed to insert/search measurements. The two-dimensional anchor proves replacement: the probe wins its old query before update, the anchor wins it after update, and the probe wins the new query. Each route response must report `live_ann.enabled`, the existing `diagnostics.route`, an empty or `none` `diagnostics.fallback_reason`, and zero live exact fallbacks and full rebuilds. Implementation-specific counters such as base/delta candidates are recorded when available, but are not required. Both reserved records are idempotently cleaned up. Missing route proof, an unsupported selected route, stale results, or a backlog/error abort the run rather than producing zero-valued metrics.
 
 Run a TreeDB streaming case with `--use-vector-index` and retain the command output. For example, use the existing command help to select `StreamingPerformanceCase` at 500 or 1000 vectors/s:
 
 ```shell
-vectordbbench TreeDBHNSW --help
-vectordbbench TreeDBHNSW --base-url http://127.0.0.1:7120 --use-vector-index \
-  --strategy native_runtime --live-ann-visibility-timeout 5
+vectordbbench treedbhnsw --help
+vectordbbench treedbhnsw --base-url http://127.0.0.1:7120 --use-vector-index \
+  --strategy native_runtime --stats-mode production --response-format ids \
+  --skip-vector-index-guards --live-ann-visibility-timeout 5
 ```
 
-The current TreeDB main service is expected to fail this preflight: its mutable `native_runtime` route is not exposed through `/search/vector-index`, while the `column_graph` route is bulk-rebuild based. Preserve that explicit failure as the HB0-HB2 baseline; do not add an optimize/rebuild between probe mutations.
+Current TreeDB exposes mutable `native_runtime` search through `/search/vector-index`; the production/full-response preflight proves that route before compact timed searches. Older services fail closed at this boundary. Do not add an optimize/rebuild between probe mutations.
 
 ### Run VectorChord (vchordrq) from command line
 

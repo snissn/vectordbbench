@@ -777,12 +777,18 @@ def test_treedb_live_ann_visibility_sleep_does_not_overshoot_deadline(monkeypatc
     assert sleeps == [0.8]
 
 
-def test_treedb_live_ann_probe_forces_full_diagnostics_transport() -> None:
+@pytest.mark.parametrize(
+    ("strategy", "configured_stats_mode", "expected_stats_mode"),
+    [("column_graph", "production", "full_diagnostics"), ("native_runtime", "production", "production")],
+)
+def test_treedb_live_ann_probe_uses_supported_diagnostics_transport(
+    strategy: str, configured_stats_mode: str, expected_stats_mode: str
+) -> None:
     probe_id = "__vectordbbench_live_ann_probe__"
     response = _result_response(
         results=[SimpleNamespace(id=probe_id)],
         diagnostics={
-            "route": "exact_hnsw_search_pack_v1",
+            "route": "native_runtime" if strategy == "native_runtime" else "exact_hnsw_search_pack_v1",
             "fallback_reason": "none",
             "live_ann": {"enabled": True, "exact_fallbacks": 0, "full_rebuilds": 0},
         },
@@ -791,7 +797,8 @@ def test_treedb_live_ann_probe_forces_full_diagnostics_transport() -> None:
         {"use_vector_index": True, "query_mode": "exact", "ef_search": 64},
         response,
     )
-    db.stats_mode = "production"
+    db.db_case_config = SimpleNamespace(strategy=strategy)
+    db.stats_mode = configured_stats_mode
     db.response_format = "ids"
     db.live_ann_visibility_timeout = 1
     db.live_ann_visibility_poll_interval = 0
@@ -799,7 +806,7 @@ def test_treedb_live_ann_probe_forces_full_diagnostics_transport() -> None:
     db._wait_for_live_ann(probe_id, [1.0, 0.0], present=True, phase="insert")
 
     options = db._client.calls[0][1]
-    assert options["stats_mode"] == "full_diagnostics"
+    assert options["stats_mode"] == expected_stats_mode
     assert "response_format" not in options
 
 
@@ -1313,8 +1320,16 @@ def test_treedb_config_shape_rejects_quantized_rerank_without_index() -> None:
     with pytest.raises(ValueError, match="separate full-response preflight"):
         db._validate_config_shape()
 
+    db.db_case_config = SimpleNamespace(strategy="native_runtime")
+    db.response_format = "full"
+    db.stats_mode = "full_diagnostics"
+    db._search_param["require_vector_index_guards"] = False
+    with pytest.raises(ValueError, match="native_runtime.*stats_mode=production"):
+        db._validate_config_shape()
+
     db.response_format = "full"
     db.stats_mode = "production"
+    db._search_param["require_vector_index_guards"] = True
     with pytest.raises(ValueError, match="separate full-response preflight"):
         db._validate_config_shape()
 
