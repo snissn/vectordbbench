@@ -107,6 +107,83 @@ def test_treedb_async_insert_clamps_to_one_thread_local_worker() -> None:
     assert runner.load_concurrency == {"requested": 4, "effective": 1}
 
 
+def test_treedb_concurrent_insert_closes_worker_clients_after_failures(monkeypatch: MonkeyPatch) -> None:
+    from vectordb_bench import config
+    from vectordb_bench.backend.clients.treedb.treedb import TreeDB
+
+    class Data:
+        train_id_field = "id"
+        train_vector_field = "vector"
+
+    class Dataset:
+        data = Data()
+
+        def iter_batches(self, batch_size):
+            import numpy as np
+            import pandas as pd
+
+            return iter([pd.DataFrame({"id": [0], "vector": [np.array([0.0])]})])
+
+    class RetryableFailure(RuntimeError):
+        pass
+
+    clients = []
+    db = object.__new__(TreeDB)
+    db.name = "TreeDB"
+    db._client = None
+    db._clients = threading.local()
+    db._new_client = lambda: SimpleNamespace(close=lambda: None, closed=False)
+
+    def new_client():
+        client = SimpleNamespace(closed=False)
+        client.close = lambda: setattr(client, "closed", True)
+        clients.append(client)
+        return client
+
+    db._new_client = new_client
+    db.insert_embeddings = lambda **kwargs: (0, RetryableFailure("retryable failure"))
+    monkeypatch.setattr(config, "MAX_INSERT_RETRY", 0)
+
+    with pytest.raises(RuntimeError, match="retried more than 0 times"):
+        ConcurrentInsertRunner(db, Dataset(), normalize=False, max_workers=2, batch_size=1).task()
+
+    assert len(clients) == 2
+    assert all(client.closed for client in clients)
+
+
+def test_treedb_concurrent_insert_closes_worker_clients_after_deadline() -> None:
+    from vectordb_bench.backend.clients.treedb.treedb import TreeDB
+
+    class Data:
+        train_id_field = "id"
+        train_vector_field = "vector"
+
+    class Dataset:
+        data = Data()
+
+        def iter_batches(self, batch_size):
+            return iter(())
+
+    clients = []
+    db = object.__new__(TreeDB)
+    db.name = "TreeDB"
+    db._client = None
+    db._clients = threading.local()
+
+    def new_client():
+        client = SimpleNamespace(closed=False)
+        client.close = lambda: setattr(client, "closed", True)
+        clients.append(client)
+        return client
+
+    db._new_client = new_client
+
+    runner = ConcurrentInsertRunner(db, Dataset(), normalize=False, max_workers=2, duration=0)
+    assert runner.task() == 0
+    assert len(clients) == 2
+    assert all(client.closed for client in clients)
+
+
 def test_treedb_config_to_dict_and_case_config_scalar_u8_rerank() -> None:
     config = TreeDBConfig(
         db_label="local",
