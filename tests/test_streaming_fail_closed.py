@@ -6,7 +6,9 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from pandas import DataFrame
 
+from vectordb_bench import config
 from vectordb_bench.backend.runner.rate_runner import RatedMultiThreadingInsertRunner
 from vectordb_bench.backend.runner.read_write_runner import ReadWriteRunner
 from vectordb_bench.backend.task_runner import CaseRunner
@@ -70,6 +72,34 @@ def test_fixed_rate_runner_does_not_count_completed_tasks_as_backlog() -> None:
     runner.run_with_rate(queue.Queue())
 
 
+def test_fixed_rate_runner_counts_acknowledged_rows_before_completion(monkeypatch: pytest.MonkeyPatch) -> None:
+    @contextmanager
+    def init():
+        yield
+
+    db = SimpleNamespace(name="Test", init=init, insert_embeddings=lambda _emb, _metadata: (3, None))
+    runner = RatedMultiThreadingInsertRunner(
+        rate=100,
+        db=db,
+        dataset_iter=iter([DataFrame({"id": range(4), "emb": [[0.0]] * 4})]),
+    )
+    completed_rows = SimpleNamespace(value=0)
+    monkeypatch.setattr(config, "TIME_PER_BATCH", 0)
+
+    runner.run_with_rate(queue.Queue(), completed_rows=completed_rows)
+
+    assert completed_rows.value == 3
+
+
+def test_fixed_rate_runner_counts_successful_retry_acknowledgement(monkeypatch: pytest.MonkeyPatch) -> None:
+    responses = iter([(0, RuntimeError("retry")), (2, None)])
+    db = SimpleNamespace(name="Test", insert_embeddings=lambda _emb, _metadata: next(responses))
+    runner = RatedMultiThreadingInsertRunner(rate=100, db=db, dataset_iter=iter(()))
+    monkeypatch.setattr("vectordb_bench.backend.runner.rate_runner.time.sleep", lambda _seconds: None)
+
+    assert runner.send_insert_task(db, [[0.0]] * 4, ["0", "1", "2", "3"]) == 2
+
+
 def test_streaming_search_failure_stops_insert_and_parent_promptly(monkeypatch: pytest.MonkeyPatch) -> None:
     class ThreadExecutor:
         def __init__(self, *args, **kwargs):
@@ -90,12 +120,12 @@ def test_streaming_search_failure_stops_insert_and_parent_promptly(monkeypatch: 
     runner = object.__new__(ReadWriteRunner)
     stopped = []
 
-    def insert(_q: Any, stop: Any) -> tuple[None, int]:
+    def insert(_q: Any, stop: Any, _completed_rows: Any) -> tuple[None, int]:
         stop.wait(1)
         stopped.append(stop.is_set())
         return None, 0
 
-    def search(_q: Any, _stop: Any) -> None:
+    def search(_q: Any, _stop: Any, _completed_rows: Any) -> None:
         raise RuntimeError("search failed")
 
     runner.run_with_rate = insert
@@ -118,6 +148,45 @@ def test_streaming_search_error_is_not_reported_as_zero_metrics() -> None:
 
     with pytest.raises(RuntimeError, match="search failed"):
         runner.run_search_by_sig(None)
+
+
+def test_streaming_search_records_completed_row_ranges() -> None:
+    runner = object.__new__(ReadWriteRunner)
+    runner.data_volume, runner.insert_rate, runner.search_stages = 1_000, 100, [0.5]
+    runner.concurrencies = [1]
+    completed_rows = SimpleNamespace(value=500)
+
+    def serial_search():
+        completed_rows.value = 525
+        return (1.0, 1.0, 1.0, 1.0), 0.1
+
+    def concurrent_search(_duration: float):
+        completed_rows.value = 700
+        return 10.0, 0.0, [1], [10.0], [2.0], [1.5], [1.0]
+
+    runner.serial_search_runner = SimpleNamespace(run=serial_search)
+    runner.get_each_conc_search_dur = lambda *_args, **_kwargs: 11
+    runner.run_by_dur = concurrent_search
+    signals = queue.Queue()
+    for _ in range(5):
+        signals.put(False)
+
+    result = runner.run_search_by_sig(signals, completed_rows=completed_rows)
+
+    assert result[0][13] == [500, 525]
+    assert result[0][14] == [525, 700]
+
+
+def test_post_write_search_records_acknowledged_rows() -> None:
+    runner = object.__new__(ReadWriteRunner)
+    runner.data_volume = 100
+    runner.read_dur_after_write = 1
+    runner.serial_search_runner = SimpleNamespace(run=lambda: ((1.0, 1.0, 1.0, 1.0), 0.1))
+    runner.run_by_dur = lambda _duration: (10.0, 0.0, [1], [10.0], [2.0], [1.5], [1.0])
+
+    result = runner.run_search(100, row_count=93)
+
+    assert result[0][13:] == ([93, 93], [93, 93])
 
 
 @pytest.mark.parametrize("requires_preflight", [False, True])
