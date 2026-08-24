@@ -42,12 +42,11 @@ class RatedMultiThreadingInsertRunner:
             if error is not None:
                 log.warning(f"Insert Failed, try_idx={retry_idx}, Exception: {error}")
                 retry_idx += 1
-                if retry_idx <= config.MAX_INSERT_RETRY:
-                    time.sleep(retry_idx)
-                    _insert_embeddings(db, emb=emb, metadata=metadata, retry_idx=retry_idx)
-                else:
+                if retry_idx > config.MAX_INSERT_RETRY:
                     msg = f"Insert failed and retried more than {config.MAX_INSERT_RETRY} times"
                     raise RuntimeError(msg) from None
+                time.sleep(retry_idx)
+                return _insert_embeddings(db, emb=emb, metadata=metadata, retry_idx=retry_idx)
             return inserted
 
         if db.name == "PgVector":

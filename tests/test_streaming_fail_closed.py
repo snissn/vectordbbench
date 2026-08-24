@@ -91,6 +91,15 @@ def test_fixed_rate_runner_counts_acknowledged_rows_before_completion(monkeypatc
     assert completed_rows.value == 3
 
 
+def test_fixed_rate_runner_counts_successful_retry_acknowledgement(monkeypatch: pytest.MonkeyPatch) -> None:
+    responses = iter([(0, RuntimeError("retry")), (2, None)])
+    db = SimpleNamespace(name="Test", insert_embeddings=lambda _emb, _metadata: next(responses))
+    runner = RatedMultiThreadingInsertRunner(rate=100, db=db, dataset_iter=iter(()))
+    monkeypatch.setattr("vectordb_bench.backend.runner.rate_runner.time.sleep", lambda _seconds: None)
+
+    assert runner.send_insert_task(db, [[0.0]] * 4, ["0", "1", "2", "3"]) == 2
+
+
 def test_streaming_search_failure_stops_insert_and_parent_promptly(monkeypatch: pytest.MonkeyPatch) -> None:
     class ThreadExecutor:
         def __init__(self, *args, **kwargs):
