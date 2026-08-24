@@ -6,7 +6,9 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from pandas import DataFrame
 
+from vectordb_bench import config
 from vectordb_bench.backend.runner.rate_runner import RatedMultiThreadingInsertRunner
 from vectordb_bench.backend.runner.read_write_runner import ReadWriteRunner
 from vectordb_bench.backend.task_runner import CaseRunner
@@ -68,6 +70,25 @@ def test_fixed_rate_runner_does_not_count_completed_tasks_as_backlog() -> None:
         future.set_result(None)
 
     runner.run_with_rate(queue.Queue())
+
+
+def test_fixed_rate_runner_counts_acknowledged_rows_before_completion(monkeypatch: pytest.MonkeyPatch) -> None:
+    @contextmanager
+    def init():
+        yield
+
+    db = SimpleNamespace(name="Test", init=init, insert_embeddings=lambda _emb, _metadata: (3, None))
+    runner = RatedMultiThreadingInsertRunner(
+        rate=100,
+        db=db,
+        dataset_iter=iter([DataFrame({"id": range(4), "emb": [[0.0]] * 4})]),
+    )
+    completed_rows = SimpleNamespace(value=0)
+    monkeypatch.setattr(config, "TIME_PER_BATCH", 0)
+
+    runner.run_with_rate(queue.Queue(), completed_rows=completed_rows)
+
+    assert completed_rows.value == 3
 
 
 def test_streaming_search_failure_stops_insert_and_parent_promptly(monkeypatch: pytest.MonkeyPatch) -> None:

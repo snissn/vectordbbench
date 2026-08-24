@@ -1,6 +1,7 @@
 import concurrent
 import logging
 import multiprocessing as mp
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from copy import copy, deepcopy
@@ -37,7 +38,7 @@ class RatedMultiThreadingInsertRunner:
 
     def send_insert_task(self, db: api.VectorDB, emb: list[list[float]], metadata: list[str]) -> int:
         def _insert_embeddings(db: api.VectorDB, emb: list[list[float]], metadata: list[str], retry_idx: int = 0):
-            _, error = db.insert_embeddings(emb, metadata)
+            inserted, error = db.insert_embeddings(emb, metadata)
             if error is not None:
                 log.warning(f"Insert Failed, try_idx={retry_idx}, Exception: {error}")
                 retry_idx += 1
@@ -47,13 +48,14 @@ class RatedMultiThreadingInsertRunner:
                 else:
                     msg = f"Insert failed and retried more than {config.MAX_INSERT_RETRY} times"
                     raise RuntimeError(msg) from None
+            return inserted
 
         if db.name == "PgVector":
             # pgvector is not thread-safe for concurrent insert,
             #   so we need to copy the db object, make sure each thread has its own connection
             db_copy = deepcopy(db)
             with db_copy.init():
-                _insert_embeddings(db_copy, emb, metadata, retry_idx=0)
+                return _insert_embeddings(db_copy, emb, metadata, retry_idx=0)
         elif db.name == "Doris":
             # DorisVectorClient is not thread-safe. Similar to pgvector, create a per-thread client
             # by deep-copying the wrapper and forcing lazy re-init inside the thread.
@@ -65,7 +67,7 @@ class RatedMultiThreadingInsertRunner:
             except Exception:
                 log.debug("Failed to reset Doris client or table on thread-local copy", exc_info=True)
             with db_copy.init():
-                _insert_embeddings(db_copy, emb, metadata, retry_idx=0)
+                return _insert_embeddings(db_copy, emb, metadata, retry_idx=0)
         elif db.name == "SeekDB":
             # mysql.connector is not thread-safe; do not share one connection across workers.
             # deepcopy() fails on an open _conn (socket is not picklable / not copy-safe in spawn workers).
@@ -76,14 +78,21 @@ class RatedMultiThreadingInsertRunner:
             except Exception:
                 log.debug("Failed to reset SeekDB connection on thread-local copy", exc_info=True)
             with db_copy.init():
-                _insert_embeddings(db_copy, emb, metadata, retry_idx=0)
+                return _insert_embeddings(db_copy, emb, metadata, retry_idx=0)
         else:
-            _insert_embeddings(db, emb, metadata, retry_idx=0)
-        return len(emb)
+            return _insert_embeddings(db, emb, metadata, retry_idx=0)
 
     @time_it
     def run_with_rate(self, q: Any = None, stop: Any = None, completed_rows: Any = None):  # noqa: C901, PLR0915
         with ThreadPoolExecutor(max_workers=mp.cpu_count()) as executor:
+            completed_rows_lock = threading.Lock()
+
+            def insert_and_record(emb: list[list[float]], metadata: list[str]) -> int:
+                inserted = self.send_insert_task(self.db, emb, metadata)
+                if completed_rows is not None:
+                    with completed_rows_lock:
+                        completed_rows.value += inserted
+                return inserted
 
             def stop_workers() -> None:
                 if stop is not None:
@@ -98,7 +107,7 @@ class RatedMultiThreadingInsertRunner:
                     if stop is not None and stop.is_set():
                         return True
                     emb, metadata = get_data(data, self.normalize)
-                    self.executing_futures.append(executor.submit(self.send_insert_task, self.db, emb, metadata))
+                    self.executing_futures.append(executor.submit(insert_and_record, emb, metadata))
                     rate -= 1
 
                     if rate == 0:
@@ -114,9 +123,7 @@ class RatedMultiThreadingInsertRunner:
                         timeout=min(wait_interval, 0.05) if stop is not None else wait_interval,
                         return_when=concurrent.futures.FIRST_EXCEPTION,
                     )
-                    inserted_rows = [fut.result() for fut in done]
-                    if completed_rows is not None:
-                        completed_rows.value += sum(inserted_rows)
+                    _ = [fut.result() for fut in done]
                     if len(not_done) > 0:
                         self.executing_futures = list(not_done)
                     else:
