@@ -56,6 +56,8 @@ class Metric:
     st_conc_latency_p99_list_list: list[list[float]] = field(default_factory=list)
     st_conc_latency_p95_list_list: list[list[float]] = field(default_factory=list)
     st_conc_latency_avg_list_list: list[list[float]] = field(default_factory=list)
+    st_serial_row_range_list: list[list[int | None]] = field(default_factory=list)
+    st_conc_row_range_list: list[list[int | None]] = field(default_factory=list)
 
 
 QURIES_PER_DOLLAR_METRIC = "QP$ (Quries per Dollar)"

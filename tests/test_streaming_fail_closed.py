@@ -90,12 +90,12 @@ def test_streaming_search_failure_stops_insert_and_parent_promptly(monkeypatch: 
     runner = object.__new__(ReadWriteRunner)
     stopped = []
 
-    def insert(_q: Any, stop: Any) -> tuple[None, int]:
+    def insert(_q: Any, stop: Any, _completed_rows: Any) -> tuple[None, int]:
         stop.wait(1)
         stopped.append(stop.is_set())
         return None, 0
 
-    def search(_q: Any, _stop: Any) -> None:
+    def search(_q: Any, _stop: Any, _completed_rows: Any) -> None:
         raise RuntimeError("search failed")
 
     runner.run_with_rate = insert
@@ -118,6 +118,33 @@ def test_streaming_search_error_is_not_reported_as_zero_metrics() -> None:
 
     with pytest.raises(RuntimeError, match="search failed"):
         runner.run_search_by_sig(None)
+
+
+def test_streaming_search_records_completed_row_ranges() -> None:
+    runner = object.__new__(ReadWriteRunner)
+    runner.data_volume, runner.insert_rate, runner.search_stages = 1_000, 100, [0.5]
+    runner.concurrencies = [1]
+    completed_rows = SimpleNamespace(value=500)
+
+    def serial_search():
+        completed_rows.value = 525
+        return (1.0, 1.0, 1.0, 1.0), 0.1
+
+    def concurrent_search(_duration: float):
+        completed_rows.value = 700
+        return 10.0, 0.0, [1], [10.0], [2.0], [1.5], [1.0]
+
+    runner.serial_search_runner = SimpleNamespace(run=serial_search)
+    runner.get_each_conc_search_dur = lambda *_args, **_kwargs: 11
+    runner.run_by_dur = concurrent_search
+    signals = queue.Queue()
+    for _ in range(5):
+        signals.put(False)
+
+    result = runner.run_search_by_sig(signals, completed_rows=completed_rows)
+
+    assert result[0][13] == [500, 525]
+    assert result[0][14] == [525, 700]
 
 
 @pytest.mark.parametrize("requires_preflight", [False, True])

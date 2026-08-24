@@ -35,7 +35,7 @@ class RatedMultiThreadingInsertRunner:
         self.executing_futures = []
         self.sig_idx = 0
 
-    def send_insert_task(self, db: api.VectorDB, emb: list[list[float]], metadata: list[str]):
+    def send_insert_task(self, db: api.VectorDB, emb: list[list[float]], metadata: list[str]) -> int:
         def _insert_embeddings(db: api.VectorDB, emb: list[list[float]], metadata: list[str], retry_idx: int = 0):
             _, error = db.insert_embeddings(emb, metadata)
             if error is not None:
@@ -79,9 +79,10 @@ class RatedMultiThreadingInsertRunner:
                 _insert_embeddings(db_copy, emb, metadata, retry_idx=0)
         else:
             _insert_embeddings(db, emb, metadata, retry_idx=0)
+        return len(emb)
 
     @time_it
-    def run_with_rate(self, q: Any = None, stop: Any = None):  # noqa: C901, PLR0915
+    def run_with_rate(self, q: Any = None, stop: Any = None, completed_rows: Any = None):  # noqa: C901, PLR0915
         with ThreadPoolExecutor(max_workers=mp.cpu_count()) as executor:
 
             def stop_workers() -> None:
@@ -113,7 +114,9 @@ class RatedMultiThreadingInsertRunner:
                         timeout=min(wait_interval, 0.05) if stop is not None else wait_interval,
                         return_when=concurrent.futures.FIRST_EXCEPTION,
                     )
-                    _ = [fut.result() for fut in done]
+                    inserted_rows = [fut.result() for fut in done]
+                    if completed_rows is not None:
+                        completed_rows.value += sum(inserted_rows)
                     if len(not_done) > 0:
                         self.executing_futures = list(not_done)
                     else:

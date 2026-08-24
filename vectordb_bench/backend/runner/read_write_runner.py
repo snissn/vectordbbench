@@ -132,6 +132,8 @@ class ReadWriteRunner(MultiProcessingSearchRunner, RatedMultiThreadingInsertRunn
                 conc_latency_p99_list,
                 conc_latency_p95_list,
                 conc_latency_avg_list,
+                [self.data_volume, self.data_volume],
+                [self.data_volume, self.data_volume],
             )
         ]
 
@@ -150,9 +152,10 @@ class ReadWriteRunner(MultiProcessingSearchRunner, RatedMultiThreadingInsertRunn
         with mp.Manager() as mp_manager:
             q = mp_manager.Queue()
             stop = mp_manager.Event()
+            completed_rows = mp_manager.Value("i", 0)
             with concurrent.futures.ProcessPoolExecutor(mp_context=mp.get_context("spawn"), max_workers=2) as executor:
-                insert_future = executor.submit(self.run_with_rate, q, stop)
-                streaming_search_future = executor.submit(self.run_search_by_sig, q, stop)
+                insert_future = executor.submit(self.run_with_rate, q, stop, completed_rows)
+                streaming_search_future = executor.submit(self.run_search_by_sig, q, stop, completed_rows)
 
                 try:
                     start_time = time.perf_counter()
@@ -197,6 +200,8 @@ class ReadWriteRunner(MultiProcessingSearchRunner, RatedMultiThreadingInsertRunn
                     m.st_conc_latency_p99_list_list = [d[10] for d in r]
                     m.st_conc_latency_p95_list_list = [d[11] for d in r]
                     m.st_conc_latency_avg_list_list = [d[12] for d in r]
+                    m.st_serial_row_range_list = [d[13] for d in r]
+                    m.st_conc_row_range_list = [d[14] for d in r]
 
                 except Exception as e:
                     log.warning(f"Read and write error: {e}")
@@ -233,7 +238,7 @@ class ReadWriteRunner(MultiProcessingSearchRunner, RatedMultiThreadingInsertRunn
             log.warning(warning_msg)
         return each_conc_search_dur
 
-    def run_search_by_sig(self, q: mp.Queue, stop: Any = None):
+    def run_search_by_sig(self, q: mp.Queue, stop: Any = None, completed_rows: Any = None):  # noqa: PLR0915
         """
         Args:
             q: multiprocessing queue
@@ -244,6 +249,9 @@ class ReadWriteRunner(MultiProcessingSearchRunner, RatedMultiThreadingInsertRunn
         result, start_batch = [], 0
         total_batch = math.ceil(self.data_volume / self.insert_rate)
         recall, ndcg, p99_latency, p95_latency = None, None, None, None
+
+        def rows() -> int | None:
+            return completed_rows.value if completed_rows is not None else None
 
         def wait_next_target(start: int, target_batch: int) -> bool:
             """Return False when receive True or None"""
@@ -269,11 +277,13 @@ class ReadWriteRunner(MultiProcessingSearchRunner, RatedMultiThreadingInsertRunn
             max_qps, recall, ndcg, p99_latency, p95_latency, conc_failed_rate = 0, 0, 0, 0, 0, 0
             conc_num_list, conc_qps_list = [], []
             conc_latency_p99_list, conc_latency_p95_list, conc_latency_avg_list = [], [], []
+            serial_row_range, conc_row_range = [rows(), None], [None, None]
             try:
                 log.info(f"[{target_batch}/{total_batch}] Serial search - {perc}% start")
                 res, ssearch_dur = self.serial_search_runner.run()
                 ssearch_dur = round(ssearch_dur, 4)
                 recall, ndcg, p99_latency, p95_latency = res
+                serial_row_range[1] = rows()
                 log.info(
                     f"[{target_batch}/{total_batch}] Serial search - {perc}% done, "
                     f"recall={recall}, ndcg={ndcg}, p99={p99_latency}, p95={p95_latency}, dur={ssearch_dur}"
@@ -289,7 +299,9 @@ class ReadWriteRunner(MultiProcessingSearchRunner, RatedMultiThreadingInsertRunn
                         f"[{target_batch}/{total_batch}] Concurrent search - {perc}% start, "
                         f"dur={each_conc_search_dur:.4f}"
                     )
+                    conc_row_range[0] = rows()
                     conc_result = self.run_by_dur(each_conc_search_dur)
+                    conc_row_range[1] = rows()
                     max_qps = conc_result[0]
                     conc_failed_rate = conc_result[1]
                     conc_num_list = conc_result[2]
@@ -321,6 +333,8 @@ class ReadWriteRunner(MultiProcessingSearchRunner, RatedMultiThreadingInsertRunn
                     conc_latency_p99_list,
                     conc_latency_p95_list,
                     conc_latency_avg_list,
+                    serial_row_range,
+                    conc_row_range,
                 )
             )
             start_batch = target_batch
