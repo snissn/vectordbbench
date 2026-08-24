@@ -95,7 +95,8 @@ class ReadWriteRunner(MultiProcessingSearchRunner, RatedMultiThreadingInsertRunn
             self.db.optimize(data_size=self.data_volume)
             log.info("Search after write - Optimize finished")
 
-    def run_search(self, perc: int):
+    def run_search(self, perc: int, row_count: int | None = None):
+        row_count = self.data_volume if row_count is None else row_count
         log.info("Search after write - Serial search start")
         test_time = round(time.perf_counter(), 4)
         res, ssearch_dur = self.serial_search_runner.run()
@@ -132,8 +133,8 @@ class ReadWriteRunner(MultiProcessingSearchRunner, RatedMultiThreadingInsertRunn
                 conc_latency_p99_list,
                 conc_latency_p95_list,
                 conc_latency_avg_list,
-                [self.data_volume, self.data_volume],
-                [self.data_volume, self.data_volume],
+                [row_count, row_count],
+                [row_count, row_count],
             )
         ]
 
@@ -170,7 +171,7 @@ class ReadWriteRunner(MultiProcessingSearchRunner, RatedMultiThreadingInsertRunn
                     if streaming_search_res is None:
                         streaming_search_res = []
 
-                    streaming_end_search_future = executor.submit(self.run_search, 100)
+                    streaming_end_search_future = executor.submit(self.run_search, 100, completed_rows.value)
                     streaming_end_search_res = streaming_end_search_future.result()
 
                     # Wait for read_write_futures finishing and do optimize and search
@@ -178,7 +179,7 @@ class ReadWriteRunner(MultiProcessingSearchRunner, RatedMultiThreadingInsertRunn
                         op_future = executor.submit(self.run_optimize)
                         _, m.optimize_duration = op_future.result()
                         log.info(f"Optimize cost {m.optimize_duration}s")
-                        optimized_search_future = executor.submit(self.run_search, 110)
+                        optimized_search_future = executor.submit(self.run_search, 110, completed_rows.value)
                         optimized_search_res = optimized_search_future.result()
                     else:
                         log.info("Skip optimization and search")

@@ -177,6 +177,18 @@ def test_streaming_search_records_completed_row_ranges() -> None:
     assert result[0][14] == [525, 700]
 
 
+def test_post_write_search_records_acknowledged_rows() -> None:
+    runner = object.__new__(ReadWriteRunner)
+    runner.data_volume = 100
+    runner.read_dur_after_write = 1
+    runner.serial_search_runner = SimpleNamespace(run=lambda: ((1.0, 1.0, 1.0, 1.0), 0.1))
+    runner.run_by_dur = lambda _duration: (10.0, 0.0, [1], [10.0], [2.0], [1.5], [1.0])
+
+    result = runner.run_search(100, row_count=93)
+
+    assert result[0][13:] == ([93, 93], [93, 93])
+
+
 @pytest.mark.parametrize("requires_preflight", [False, True])
 def test_treedb_streaming_only_runs_preflight_for_vector_index_cases(requires_preflight: bool) -> None:
     @contextmanager
