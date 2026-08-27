@@ -548,6 +548,54 @@ def test_treedb_lifecycle_sidecar_preserves_load_and_optimize_boundaries(monkeyp
     assert all(isinstance(record["timestamp_ns"], int) for record in records)
 
 
+def test_treedb_lifecycle_failure_after_acceptance_is_not_retried(monkeypatch: MonkeyPatch, tmp_path) -> None:
+    monkeypatch.setenv("TREEDB_LIFECYCLE_SIDECAR", str(tmp_path / "lifecycle.jsonl"))
+    calls = []
+
+    class FakeDocument:
+        def __init__(self, id, embedding):
+            self.id = id
+            self.embedding = embedding
+
+    class FakeClient:
+        def __init__(self, base_url, timeout=30.0):
+            pass
+
+        def create_index(self, *args, **kwargs):
+            pass
+
+        def upsert_documents(self, index_name, documents, *, defer_vector_index_rebuild=False):
+            calls.append([document.id for document in documents])
+            return SimpleNamespace(upserted=len(documents))
+
+    fake_module = ModuleType("treedb_client")
+    fake_module.Document = FakeDocument
+    fake_module.TreeDBClient = FakeClient
+    monkeypatch.setitem(sys.modules, "treedb_client", fake_module)
+
+    from vectordb_bench.backend.clients.treedb import treedb as treedb_module
+
+    real_append = treedb_module._append_lifecycle_record
+
+    def fail_after_acceptance(path, event, **values):
+        if event == "batch_accepted":
+            raise OSError("sidecar full")
+        return real_append(path, event, **values)
+
+    monkeypatch.setattr(treedb_module, "_append_lifecycle_record", fail_after_acceptance)
+    db = treedb_module.TreeDB(
+        dim=2,
+        db_config={"base_url": "http://127.0.0.1:7120", "index_name": "bench"},
+        db_case_config=TreeDBColumnGraphExactConfig(),
+    )
+    runner = ConcurrentInsertRunner.__new__(ConcurrentInsertRunner)
+
+    with pytest.raises(RuntimeError, match="after 2 inserted rows"):
+        runner._insert_batch_with_retry(db, [[1.0, 0.0], [0.0, 1.0]], [7, 8])
+
+    assert calls == [["7", "8"]]
+
+
 def test_treedb_lifecycle_sidecar_serializes_nested_client_dataclasses(monkeypatch: MonkeyPatch, tmp_path) -> None:
     from vectordb_bench.backend.clients.treedb.treedb import _append_lifecycle_record, _jsonable_response
 

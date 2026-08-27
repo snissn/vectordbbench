@@ -14,7 +14,7 @@ import numpy as np
 
 from vectordb_bench.backend.filter import Filter, FilterOp
 
-from ..api import MetricType, VectorDB
+from ..api import MetricType, PartialInsertError, VectorDB
 from .config import TreeDBHNSWConfig
 
 log = logging.getLogger(__name__)
@@ -219,15 +219,24 @@ class TreeDB(VectorDB):
                 documents,
                 defer_vector_index_rebuild=bool(self._search_param.get("use_vector_index")),
             )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Failed to insert embeddings into TreeDB index %s: %s", self.index_name, exc)
+            return 0, exc
+        try:
             self._emit_lifecycle(
                 "batch_accepted",
                 client_sent=len(metadata),
                 server_accepted=response.upserted,
             )
-            return response.upserted, None
         except Exception as exc:  # noqa: BLE001
-            log.warning("Failed to insert embeddings into TreeDB index %s: %s", self.index_name, exc)
-            return 0, exc
+            error = PartialInsertError(
+                "TreeDB accepted the batch but lifecycle instrumentation failed",
+                inserted_count=response.upserted,
+                cause=exc,
+            )
+            log.warning("TreeDB lifecycle instrumentation failed after accepting %d rows: %s", response.upserted, exc)
+            return response.upserted, error
+        return response.upserted, None
 
     def optimize(self, data_size: int | None = None):
         self._emit_lifecycle("load_end")
