@@ -9,6 +9,7 @@ import pytest
 from pandas import DataFrame
 
 from vectordb_bench import config
+from vectordb_bench.backend.clients.api import PartialInsertError
 from vectordb_bench.backend.runner.rate_runner import RatedMultiThreadingInsertRunner
 from vectordb_bench.backend.runner.read_write_runner import ReadWriteRunner
 from vectordb_bench.backend.runner.serial_runner import SerialInsertRunner
@@ -125,18 +126,17 @@ def test_fixed_rate_runner_does_not_retry_non_retryable_partial_acceptance(monke
 
 
 def test_serial_runner_does_not_retry_non_retryable_partial_acceptance(monkeypatch: pytest.MonkeyPatch) -> None:
-    class AcceptedButUninstrumented(RuntimeError):
-        non_retryable = True
-
     calls = []
 
     @contextmanager
     def init():
         yield
 
+    error = PartialInsertError("sidecar full", inserted_count=2)
+
     def insert_embeddings(*, embeddings, metadata):
         calls.append((embeddings, metadata))
-        return 2, AcceptedButUninstrumented("sidecar full")
+        return 2, error
 
     db = SimpleNamespace(name="Test", init=init, insert_embeddings=insert_embeddings)
     runner = SerialInsertRunner(db=db, dataset=SimpleNamespace(), normalize=False)
@@ -145,10 +145,37 @@ def test_serial_runner_does_not_retry_non_retryable_partial_acceptance(monkeypat
         lambda _seconds: pytest.fail("non-retryable failure slept before abort"),
     )
 
-    with pytest.raises(RuntimeError, match="after 2 inserted rows"):
+    with pytest.raises(PartialInsertError) as caught:
         runner.endless_insert_data([[0.0], [1.0]], [0, 1])
 
+    assert caught.value is error
     assert len(calls) == 1
+
+
+def test_serial_capacity_runner_propagates_non_retryable_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Dataset:
+        data = SimpleNamespace(train_vector_field="emb", train_id_field="id")
+
+        def __iter__(self):
+            return iter([DataFrame({"id": [0], "emb": [[0.0]]})])
+
+    error = PartialInsertError("sidecar full", inserted_count=1)
+    runner = SerialInsertRunner(
+        db=SimpleNamespace(),
+        dataset=Dataset(),
+        normalize=False,
+        timeout=1,
+    )
+
+    def fail_insert(*_args: Any, **_kwargs: Any) -> int:
+        raise error
+
+    monkeypatch.setattr(runner, "endless_insert_data", fail_insert)
+
+    with pytest.raises(PartialInsertError) as caught:
+        runner.run_endlessness()
+
+    assert caught.value is error
 
 
 def test_streaming_search_failure_stops_insert_and_parent_promptly(monkeypatch: pytest.MonkeyPatch) -> None:

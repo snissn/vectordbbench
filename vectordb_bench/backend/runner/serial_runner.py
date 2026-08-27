@@ -68,8 +68,7 @@ class SerialInsertRunner:
                     already_insert_count += insert_count
                     if error is not None:
                         if getattr(error, "non_retryable", False):
-                            msg = f"Non-retryable insert failure after {already_insert_count} inserted rows: {error}"
-                            raise RuntimeError(msg) from error
+                            raise error
                         retry_count += 1
                         time.sleep(10)
 
@@ -117,6 +116,8 @@ class SerialInsertRunner:
                     f"{max_load_count}"
                 )
         except Exception as e:
+            if getattr(e, "non_retryable", False):
+                raise
             log.info(
                 f"Capacity case load reach limit, insertion counts={utils.numerize(max_load_count)}, "
                 f"{max_load_count}, err={e}"
