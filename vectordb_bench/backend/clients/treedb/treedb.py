@@ -15,7 +15,7 @@ import numpy as np
 
 from vectordb_bench.backend.filter import Filter, FilterOp
 
-from ..api import MetricType, PartialInsertError, VectorDB
+from ..api import MetricType, OptimizeResult, PartialInsertError, VectorDB
 from .config import TreeDBHNSWConfig
 
 log = logging.getLogger(__name__)
@@ -31,6 +31,8 @@ _QUERY_EMBEDDING_ENCODINGS = ("json", "f32_le_b64", "f32_le")
 _DOCUMENT_EMBEDDING_ENCODINGS = ("json", "f32_le_b64")
 _LIFECYCLE_SIDECAR_ENV = "TREEDB_LIFECYCLE_SIDECAR"
 _LIFECYCLE_BOUNDARY_ACK_ENV = "TREEDB_LIFECYCLE_BOUNDARY_ACK"
+_LIFECYCLE_BOUNDARIES = ("load_end", "optimize_start", "optimize_end")
+_LIFECYCLE_BOUNDARY_ACK_TIMEOUT = 30.0
 
 
 def _jsonable_response(response: Any) -> Any:
@@ -64,7 +66,9 @@ def _append_lifecycle_record(path: str, event: str, **values: Any) -> int:
     return timestamp_ns
 
 
-def _wait_for_boundary_ack(path: str, boundary: str, boundary_ns: int, timeout: float = 30.0) -> None:
+def _wait_for_boundary_ack(
+    path: str, boundary: str, boundary_ns: int, timeout: float = _LIFECYCLE_BOUNDARY_ACK_TIMEOUT
+) -> None:
     deadline = time.monotonic() + timeout
     last_decode_error: json.JSONDecodeError | None = None
     while time.monotonic() < deadline:
@@ -125,6 +129,11 @@ class TreeDB(VectorDB):
         self._client = None
         self._clients = threading.local()
         self._lifecycle_sidecar = os.environ.get(_LIFECYCLE_SIDECAR_ENV)
+        self.optimize_timeout_allowance = (
+            len(_LIFECYCLE_BOUNDARIES) * _LIFECYCLE_BOUNDARY_ACK_TIMEOUT
+            if os.environ.get(_LIFECYCLE_BOUNDARY_ACK_ENV)
+            else 0.0
+        )
         self._lifecycle_lock = threading.Lock()
         self._lifecycle_load_started = False
         self._search_param = db_case_config.search_param()
@@ -283,8 +292,11 @@ class TreeDB(VectorDB):
 
         emit_boundary("load_end")
         emit_boundary("optimize_start")
+        started = time.perf_counter()
         response = self.client.optimize_index(self.index_name)
+        duration = time.perf_counter() - started
         emit_boundary("optimize_end", response=_jsonable_response(response))
+        return OptimizeResult(duration_seconds=duration)
 
     @property
     def requires_live_ann_preflight(self) -> bool:

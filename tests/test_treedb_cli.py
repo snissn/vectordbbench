@@ -557,6 +557,7 @@ def test_treedb_lifecycle_waits_for_exact_diagnostics_at_each_optimize_boundary(
     monkeypatch.setenv("TREEDB_LIFECYCLE_SIDECAR", str(sidecar))
     monkeypatch.setenv("TREEDB_LIFECYCLE_BOUNDARY_ACK", str(acknowledgement))
     optimize_started = threading.Event()
+    optimize_results = []
 
     class FakeClient:
         def __init__(self, base_url, timeout=30.0):
@@ -567,6 +568,7 @@ def test_treedb_lifecycle_waits_for_exact_diagnostics_at_each_optimize_boundary(
 
         def optimize_index(self, index_name):
             optimize_started.set()
+            time.sleep(0.02)
             return SimpleNamespace(root_id=9)
 
     fake_module = ModuleType("treedb_client")
@@ -582,7 +584,8 @@ def test_treedb_lifecycle_waits_for_exact_diagnostics_at_each_optimize_boundary(
         db_case_config=TreeDBColumnGraphExactConfig(),
         drop_old=True,
     )
-    worker = threading.Thread(target=db.optimize)
+    started = time.perf_counter()
+    worker = threading.Thread(target=lambda: optimize_results.append(db.optimize()))
     worker.start()
 
     def acknowledge(event: str) -> None:
@@ -596,6 +599,7 @@ def test_treedb_lifecycle_waits_for_exact_diagnostics_at_each_optimize_boundary(
                     break
             time.sleep(0.01)
         assert record is not None
+        time.sleep(0.03)
         acknowledgement.write_text(
             json.dumps(
                 {
@@ -615,8 +619,13 @@ def test_treedb_lifecycle_waits_for_exact_diagnostics_at_each_optimize_boundary(
     assert optimize_started.is_set()
     acknowledge("optimize_end")
     worker.join(timeout=2)
+    wall_duration = time.perf_counter() - started
 
     assert not worker.is_alive()
+    assert len(optimize_results) == 1
+    assert optimize_results[0].duration_seconds == pytest.approx(0.02, abs=0.02)
+    assert wall_duration - optimize_results[0].duration_seconds >= 0.06
+    assert db.optimize_timeout_allowance == 90.0
 
 
 def test_treedb_lifecycle_ignores_stale_ack_until_current_run_replaces_it(tmp_path) -> None:
