@@ -1,4 +1,5 @@
 import base64
+import json
 import pickle
 import sys
 import threading
@@ -419,6 +420,117 @@ def test_treedb_vector_index_inserts_defer_rebuild_until_optimize(monkeypatch: M
     assert count == 1
     assert calls[0][0] == "bench"
     assert calls[0][2] is True
+
+
+def test_treedb_lifecycle_sidecar_is_absent_by_default(monkeypatch: MonkeyPatch, tmp_path) -> None:
+    sidecar = tmp_path / "lifecycle.jsonl"
+    monkeypatch.delenv("TREEDB_LIFECYCLE_SIDECAR", raising=False)
+
+    class FakeDocument:
+        def __init__(self, id, embedding):
+            self.id = id
+            self.embedding = embedding
+
+    class FakeClient:
+        def __init__(self, base_url, timeout=30.0):
+            pass
+
+        def reset_index(self, *args, **kwargs):
+            return SimpleNamespace(index_name="bench", generation=1)
+
+        def upsert_documents(self, index_name, documents, *, defer_vector_index_rebuild=False):
+            return SimpleNamespace(upserted=len(documents))
+
+        def optimize_index(self, index_name):
+            return SimpleNamespace(root_id=9)
+
+    fake_module = ModuleType("treedb_client")
+    fake_module.Document = FakeDocument
+    fake_module.TreeDBClient = FakeClient
+    monkeypatch.setitem(sys.modules, "treedb_client", fake_module)
+
+    from vectordb_bench.backend.clients.treedb.treedb import TreeDB
+
+    db = TreeDB(
+        dim=2,
+        db_config={"base_url": "http://127.0.0.1:7120", "index_name": "bench"},
+        db_case_config=TreeDBColumnGraphExactConfig(),
+        drop_old=True,
+    )
+    assert db.insert_embeddings([[1.0, 0.0]], [7]) == (1, None)
+    db.optimize()
+
+    assert not sidecar.exists()
+
+
+def test_treedb_lifecycle_sidecar_preserves_load_and_optimize_boundaries(monkeypatch: MonkeyPatch, tmp_path) -> None:
+    sidecar = tmp_path / "lifecycle.jsonl"
+    monkeypatch.setenv("TREEDB_LIFECYCLE_SIDECAR", str(sidecar))
+
+    class FakeDocument:
+        def __init__(self, id, embedding):
+            self.id = id
+            self.embedding = embedding
+
+    class FakeResponse:
+        def __init__(self, **values):
+            self.values = values
+
+        def model_dump(self, *, mode):
+            assert mode == "json"
+            return self.values
+
+    class FakeClient:
+        def __init__(self, base_url, timeout=30.0):
+            pass
+
+        def reset_index(self, *args, **kwargs):
+            return FakeResponse(index_name="bench", generation=1)
+
+        def upsert_documents(self, index_name, documents, *, defer_vector_index_rebuild=False):
+            return SimpleNamespace(upserted=len(documents))
+
+        def optimize_index(self, index_name):
+            return FakeResponse(
+                index_name=index_name,
+                generation=2,
+                maintenance={"root_id": 9},
+                timing={"cache_prime_seconds": 0.5, "cache_warm_seconds": 0.25},
+            )
+
+    fake_module = ModuleType("treedb_client")
+    fake_module.Document = FakeDocument
+    fake_module.TreeDBClient = FakeClient
+    monkeypatch.setitem(sys.modules, "treedb_client", fake_module)
+
+    from vectordb_bench.backend.clients.treedb.treedb import TreeDB
+
+    db = TreeDB(
+        dim=2,
+        db_config={"base_url": "http://127.0.0.1:7120", "index_name": "bench"},
+        db_case_config=TreeDBColumnGraphExactConfig(),
+        drop_old=True,
+    )
+    assert db.insert_embeddings([[1.0, 0.0], [0.0, 1.0]], [7, 8]) == (2, None)
+    assert db.insert_embeddings([[0.5, 0.5]], [9]) == (1, None)
+
+    restored = pickle.loads(pickle.dumps(db))  # noqa: S301
+    restored.optimize()
+
+    records = [json.loads(line) for line in sidecar.read_text().splitlines()]
+    assert [record["event"] for record in records] == [
+        "reset",
+        "load_start",
+        "batch_accepted",
+        "batch_accepted",
+        "load_end",
+        "optimize_start",
+        "optimize_end",
+    ]
+    assert sum(record.get("client_sent", 0) for record in records) == 3
+    assert sum(record.get("server_accepted", 0) for record in records) == 3
+    assert records[-1]["response"]["maintenance"]["root_id"] == 9
+    assert all(isinstance(record["timestamp_ns"], int) for record in records)
 
 
 def test_treedb_compact_document_insert_sends_exact_f32le_bytes(monkeypatch: MonkeyPatch) -> None:

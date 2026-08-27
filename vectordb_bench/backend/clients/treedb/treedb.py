@@ -1,6 +1,8 @@
 import base64
+import json
 import logging
 import math
+import os
 import threading
 import time
 from contextlib import contextmanager
@@ -24,6 +26,28 @@ _QUANTIZED_ASSET_FAILURE_STATS = (
 )
 _QUERY_EMBEDDING_ENCODINGS = ("json", "f32_le_b64", "f32_le")
 _DOCUMENT_EMBEDDING_ENCODINGS = ("json", "f32_le_b64")
+_LIFECYCLE_SIDECAR_ENV = "TREEDB_LIFECYCLE_SIDECAR"
+
+
+def _jsonable_response(response: Any) -> Any:
+    if callable(getattr(response, "model_dump", None)):
+        return response.model_dump(mode="json")
+    if callable(getattr(response, "dict", None)):
+        return response.dict()
+    if hasattr(response, "__dict__"):
+        return vars(response)
+    return response
+
+
+def _append_lifecycle_record(path: str, event: str, **values: Any) -> None:
+    record = {"event": event, "timestamp_ns": time.time_ns(), **values}
+    payload = (json.dumps(record, separators=(",", ":"), sort_keys=True) + "\n").encode()
+    fd = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+    try:
+        if os.write(fd, payload) != len(payload):
+            raise OSError("short lifecycle sidecar write")
+    finally:
+        os.close(fd)
 
 
 class TreeDB(VectorDB):
@@ -58,6 +82,9 @@ class TreeDB(VectorDB):
         self.live_ann_visibility_poll_interval = db_config.get("live_ann_visibility_poll_interval", 0.05)
         self._client = None
         self._clients = threading.local()
+        self._lifecycle_sidecar = os.environ.get(_LIFECYCLE_SIDECAR_ENV)
+        self._lifecycle_lock = threading.Lock()
+        self._lifecycle_load_started = False
         self._search_param = db_case_config.search_param()
         self._metric = self._parse_metric(db_case_config.metric_type)
         self._vector_index_options = (
@@ -73,13 +100,14 @@ class TreeDB(VectorDB):
         client = self._new_client()
         try:
             if drop_old:
-                client.reset_index(
+                response = client.reset_index(
                     self.index_name,
                     dimension=self.dim,
                     metric=self._metric,
                     drop_old=True,
                     vector_index_options=self._vector_index_options,
                 )
+                self._emit_lifecycle("reset", response=_jsonable_response(response))
             else:
                 client.create_index(
                     self.index_name,
@@ -94,11 +122,25 @@ class TreeDB(VectorDB):
         state = self.__dict__.copy()
         state["_client"] = None
         state.pop("_clients", None)
+        state.pop("_lifecycle_lock", None)
         return state
 
     def __setstate__(self, state):
         self.__dict__.update(state)
         self._clients = threading.local()
+        self._lifecycle_lock = threading.Lock()
+
+    def _emit_lifecycle(self, event: str, **values: Any) -> None:
+        if self._lifecycle_sidecar:
+            _append_lifecycle_record(self._lifecycle_sidecar, event, **values)
+
+    def _emit_load_start(self) -> None:
+        if not self._lifecycle_sidecar or self._lifecycle_load_started:
+            return
+        with self._lifecycle_lock:
+            if not self._lifecycle_load_started:
+                self._emit_lifecycle("load_start")
+                self._lifecycle_load_started = True
 
     def _new_client(self, timeout: float | None = None):
         from treedb_client import TreeDBClient
@@ -144,6 +186,7 @@ class TreeDB(VectorDB):
         **kwargs: Any,
     ) -> tuple[int, Exception | None]:
         try:
+            self._emit_load_start()
             if self.document_embedding_encoding == "f32_le_b64":
                 documents = [
                     {
@@ -166,13 +209,21 @@ class TreeDB(VectorDB):
                 documents,
                 defer_vector_index_rebuild=bool(self._search_param.get("use_vector_index")),
             )
+            self._emit_lifecycle(
+                "batch_accepted",
+                client_sent=len(metadata),
+                server_accepted=response.upserted,
+            )
             return response.upserted, None
         except Exception as exc:  # noqa: BLE001
             log.warning("Failed to insert embeddings into TreeDB index %s: %s", self.index_name, exc)
             return 0, exc
 
     def optimize(self, data_size: int | None = None):
-        self.client.optimize_index(self.index_name)
+        self._emit_lifecycle("load_end")
+        self._emit_lifecycle("optimize_start")
+        response = self.client.optimize_index(self.index_name)
+        self._emit_lifecycle("optimize_end", response=_jsonable_response(response))
 
     @property
     def requires_live_ann_preflight(self) -> bool:
