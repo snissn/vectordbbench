@@ -645,6 +645,37 @@ def test_treedb_lifecycle_ignores_stale_ack_until_current_run_replaces_it(tmp_pa
     assert completed.is_set()
 
 
+def test_treedb_lifecycle_waits_through_partial_ack_but_persistent_malformed_fails_closed(tmp_path) -> None:
+    from vectordb_bench.backend.clients.treedb.treedb import _wait_for_load_end_ack
+
+    acknowledgement = tmp_path / "load-end-diagnostics.json"
+    acknowledgement.write_text('{"load_end_timestamp_ns":')
+    completed = threading.Event()
+
+    worker = threading.Thread(
+        target=lambda: (_wait_for_load_end_ack(str(acknowledgement), 20, timeout=1), completed.set())
+    )
+    worker.start()
+    time.sleep(0.03)
+    assert not completed.is_set()
+    acknowledgement.write_text(
+        json.dumps(
+            {
+                "load_end_timestamp_ns": 20,
+                "sample_timestamp_ns": 21,
+            }
+        )
+    )
+    worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert completed.is_set()
+
+    acknowledgement.write_text("{")
+    with pytest.raises(TimeoutError, match="remained malformed"):
+        _wait_for_load_end_ack(str(acknowledgement), 30, timeout=0.03)
+
+
 def test_treedb_lifecycle_failure_after_acceptance_is_not_retried(monkeypatch: MonkeyPatch, tmp_path) -> None:
     monkeypatch.setenv("TREEDB_LIFECYCLE_SIDECAR", str(tmp_path / "lifecycle.jsonl"))
     calls = []

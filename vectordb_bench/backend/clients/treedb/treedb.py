@@ -64,8 +64,9 @@ def _append_lifecycle_record(path: str, event: str, **values: Any) -> int:
     return timestamp_ns
 
 
-def _wait_for_load_end_ack(path: str, load_end_ns: int) -> None:
-    deadline = time.monotonic() + 30.0
+def _wait_for_load_end_ack(path: str, load_end_ns: int, timeout: float = 30.0) -> None:
+    deadline = time.monotonic() + timeout
+    last_decode_error: json.JSONDecodeError | None = None
     while time.monotonic() < deadline:
         try:
             with Path(path).open(encoding="utf-8") as source:
@@ -73,6 +74,11 @@ def _wait_for_load_end_ack(path: str, load_end_ns: int) -> None:
         except FileNotFoundError:
             time.sleep(0.01)
             continue
+        except json.JSONDecodeError as exc:
+            last_decode_error = exc
+            time.sleep(0.01)
+            continue
+        last_decode_error = None
         if not isinstance(acknowledgement, dict):
             raise ValueError("TreeDB lifecycle load-end diagnostics acknowledgement must be an object")
         if acknowledgement.get("load_end_timestamp_ns") != load_end_ns:
@@ -82,7 +88,8 @@ def _wait_for_load_end_ack(path: str, load_end_ns: int) -> None:
         if not isinstance(sample_ns, int) or isinstance(sample_ns, bool) or sample_ns < load_end_ns:
             raise RuntimeError("TreeDB lifecycle load-end diagnostics acknowledgement has an invalid sample timestamp")
         return
-    raise TimeoutError("timed out waiting for TreeDB lifecycle load-end diagnostics")
+    detail = f": acknowledgement remained malformed ({last_decode_error})" if last_decode_error else ""
+    raise TimeoutError(f"timed out waiting for TreeDB lifecycle load-end diagnostics{detail}")
 
 
 class TreeDB(VectorDB):
