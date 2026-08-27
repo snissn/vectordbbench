@@ -30,7 +30,7 @@ _QUANTIZED_ASSET_FAILURE_STATS = (
 _QUERY_EMBEDDING_ENCODINGS = ("json", "f32_le_b64", "f32_le")
 _DOCUMENT_EMBEDDING_ENCODINGS = ("json", "f32_le_b64")
 _LIFECYCLE_SIDECAR_ENV = "TREEDB_LIFECYCLE_SIDECAR"
-_LIFECYCLE_LOAD_END_ACK_ENV = "TREEDB_LIFECYCLE_LOAD_END_ACK"
+_LIFECYCLE_BOUNDARY_ACK_ENV = "TREEDB_LIFECYCLE_BOUNDARY_ACK"
 
 
 def _jsonable_response(response: Any) -> Any:
@@ -64,7 +64,7 @@ def _append_lifecycle_record(path: str, event: str, **values: Any) -> int:
     return timestamp_ns
 
 
-def _wait_for_load_end_ack(path: str, load_end_ns: int, timeout: float = 30.0) -> None:
+def _wait_for_boundary_ack(path: str, boundary: str, boundary_ns: int, timeout: float = 30.0) -> None:
     deadline = time.monotonic() + timeout
     last_decode_error: json.JSONDecodeError | None = None
     while time.monotonic() < deadline:
@@ -80,16 +80,16 @@ def _wait_for_load_end_ack(path: str, load_end_ns: int, timeout: float = 30.0) -
             continue
         last_decode_error = None
         if not isinstance(acknowledgement, dict):
-            raise ValueError("TreeDB lifecycle load-end diagnostics acknowledgement must be an object")
-        if acknowledgement.get("load_end_timestamp_ns") != load_end_ns:
+            raise ValueError("TreeDB lifecycle diagnostics acknowledgement must be an object")
+        if acknowledgement.get("boundary") != boundary or acknowledgement.get("boundary_timestamp_ns") != boundary_ns:
             time.sleep(0.01)
             continue
         sample_ns = acknowledgement.get("sample_timestamp_ns")
-        if not isinstance(sample_ns, int) or isinstance(sample_ns, bool) or sample_ns < load_end_ns:
-            raise RuntimeError("TreeDB lifecycle load-end diagnostics acknowledgement has an invalid sample timestamp")
+        if not isinstance(sample_ns, int) or isinstance(sample_ns, bool) or sample_ns < boundary_ns:
+            raise RuntimeError("TreeDB lifecycle diagnostics acknowledgement has an invalid sample timestamp")
         return
     detail = f": acknowledgement remained malformed ({last_decode_error})" if last_decode_error else ""
-    raise TimeoutError(f"timed out waiting for TreeDB lifecycle load-end diagnostics{detail}")
+    raise TimeoutError(f"timed out waiting for TreeDB lifecycle {boundary} diagnostics{detail}")
 
 
 class TreeDB(VectorDB):
@@ -272,15 +272,19 @@ class TreeDB(VectorDB):
         return response.upserted, None
 
     def optimize(self, data_size: int | None = None):
-        load_end_ns = self._emit_lifecycle("load_end")
-        acknowledgement = os.environ.get(_LIFECYCLE_LOAD_END_ACK_ENV)
-        if acknowledgement:
-            if load_end_ns is None:
-                raise RuntimeError("TreeDB lifecycle load-end acknowledgement requires the lifecycle sidecar")
-            _wait_for_load_end_ack(acknowledgement, load_end_ns)
-        self._emit_lifecycle("optimize_start")
+        acknowledgement = os.environ.get(_LIFECYCLE_BOUNDARY_ACK_ENV)
+
+        def emit_boundary(event: str, **values: Any) -> None:
+            timestamp_ns = self._emit_lifecycle(event, **values)
+            if acknowledgement:
+                if timestamp_ns is None:
+                    raise RuntimeError("TreeDB lifecycle diagnostics acknowledgement requires the lifecycle sidecar")
+                _wait_for_boundary_ack(acknowledgement, event, timestamp_ns)
+
+        emit_boundary("load_end")
+        emit_boundary("optimize_start")
         response = self.client.optimize_index(self.index_name)
-        self._emit_lifecycle("optimize_end", response=_jsonable_response(response))
+        emit_boundary("optimize_end", response=_jsonable_response(response))
 
     @property
     def requires_live_ann_preflight(self) -> bool:

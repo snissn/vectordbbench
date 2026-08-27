@@ -549,11 +549,13 @@ def test_treedb_lifecycle_sidecar_preserves_load_and_optimize_boundaries(monkeyp
     assert all(isinstance(record["timestamp_ns"], int) for record in records)
 
 
-def test_treedb_lifecycle_waits_for_load_end_diagnostics_before_optimize(monkeypatch: MonkeyPatch, tmp_path) -> None:
+def test_treedb_lifecycle_waits_for_exact_diagnostics_at_each_optimize_boundary(
+    monkeypatch: MonkeyPatch, tmp_path
+) -> None:
     sidecar = tmp_path / "lifecycle.jsonl"
-    acknowledgement = tmp_path / "load-end-diagnostics.json"
+    acknowledgement = tmp_path / "lifecycle-boundary-diagnostics.json"
     monkeypatch.setenv("TREEDB_LIFECYCLE_SIDECAR", str(sidecar))
-    monkeypatch.setenv("TREEDB_LIFECYCLE_LOAD_END_ACK", str(acknowledgement))
+    monkeypatch.setenv("TREEDB_LIFECYCLE_BOUNDARY_ACK", str(acknowledgement))
     optimize_started = threading.Event()
 
     class FakeClient:
@@ -582,40 +584,50 @@ def test_treedb_lifecycle_waits_for_load_end_diagnostics_before_optimize(monkeyp
     )
     worker = threading.Thread(target=db.optimize)
     worker.start()
-    deadline = time.monotonic() + 2
-    load_end = None
-    while time.monotonic() < deadline:
-        if sidecar.exists():
-            records = [json.loads(line) for line in sidecar.read_text().splitlines()]
-            load_end = next((record for record in records if record["event"] == "load_end"), None)
-            if load_end is not None:
-                break
-        time.sleep(0.01)
 
-    assert load_end is not None
-    assert not optimize_started.is_set()
-    acknowledgement.write_text(
-        json.dumps(
-            {
-                "load_end_timestamp_ns": load_end["timestamp_ns"],
-                "sample_timestamp_ns": load_end["timestamp_ns"] + 1,
-            }
+    def acknowledge(event: str) -> None:
+        deadline = time.monotonic() + 2
+        record = None
+        while time.monotonic() < deadline:
+            if sidecar.exists():
+                records = [json.loads(line) for line in sidecar.read_text().splitlines()]
+                record = next((item for item in records if item["event"] == event), None)
+                if record is not None:
+                    break
+            time.sleep(0.01)
+        assert record is not None
+        acknowledgement.write_text(
+            json.dumps(
+                {
+                    "boundary": event,
+                    "boundary_timestamp_ns": record["timestamp_ns"],
+                    "sample_timestamp_ns": record["timestamp_ns"] + 1,
+                }
+            )
         )
-    )
+
+    acknowledge("load_end")
+    assert not optimize_started.is_set()
+    acknowledge("optimize_start")
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline and not optimize_started.is_set():
+        time.sleep(0.01)
+    assert optimize_started.is_set()
+    acknowledge("optimize_end")
     worker.join(timeout=2)
 
     assert not worker.is_alive()
-    assert optimize_started.is_set()
 
 
 def test_treedb_lifecycle_ignores_stale_ack_until_current_run_replaces_it(tmp_path) -> None:
-    from vectordb_bench.backend.clients.treedb.treedb import _wait_for_load_end_ack
+    from vectordb_bench.backend.clients.treedb.treedb import _wait_for_boundary_ack
 
-    acknowledgement = tmp_path / "load-end-diagnostics.json"
+    acknowledgement = tmp_path / "lifecycle-boundary-diagnostics.json"
     acknowledgement.write_text(
         json.dumps(
             {
-                "load_end_timestamp_ns": 10,
+                "boundary": "load_end",
+                "boundary_timestamp_ns": 10,
                 "sample_timestamp_ns": 11,
             }
         )
@@ -623,7 +635,7 @@ def test_treedb_lifecycle_ignores_stale_ack_until_current_run_replaces_it(tmp_pa
     completed = threading.Event()
 
     def wait() -> None:
-        _wait_for_load_end_ack(str(acknowledgement), 20)
+        _wait_for_boundary_ack(str(acknowledgement), "load_end", 20)
         completed.set()
 
     worker = threading.Thread(target=wait)
@@ -634,7 +646,8 @@ def test_treedb_lifecycle_ignores_stale_ack_until_current_run_replaces_it(tmp_pa
     acknowledgement.write_text(
         json.dumps(
             {
-                "load_end_timestamp_ns": 20,
+                "boundary": "load_end",
+                "boundary_timestamp_ns": 20,
                 "sample_timestamp_ns": 21,
             }
         )
@@ -646,14 +659,17 @@ def test_treedb_lifecycle_ignores_stale_ack_until_current_run_replaces_it(tmp_pa
 
 
 def test_treedb_lifecycle_waits_through_partial_ack_but_persistent_malformed_fails_closed(tmp_path) -> None:
-    from vectordb_bench.backend.clients.treedb.treedb import _wait_for_load_end_ack
+    from vectordb_bench.backend.clients.treedb.treedb import _wait_for_boundary_ack
 
-    acknowledgement = tmp_path / "load-end-diagnostics.json"
-    acknowledgement.write_text('{"load_end_timestamp_ns":')
+    acknowledgement = tmp_path / "lifecycle-boundary-diagnostics.json"
+    acknowledgement.write_text('{"boundary":')
     completed = threading.Event()
 
     worker = threading.Thread(
-        target=lambda: (_wait_for_load_end_ack(str(acknowledgement), 20, timeout=1), completed.set())
+        target=lambda: (
+            _wait_for_boundary_ack(str(acknowledgement), "load_end", 20, timeout=1),
+            completed.set(),
+        )
     )
     worker.start()
     time.sleep(0.03)
@@ -661,7 +677,8 @@ def test_treedb_lifecycle_waits_through_partial_ack_but_persistent_malformed_fai
     acknowledgement.write_text(
         json.dumps(
             {
-                "load_end_timestamp_ns": 20,
+                "boundary": "load_end",
+                "boundary_timestamp_ns": 20,
                 "sample_timestamp_ns": 21,
             }
         )
@@ -673,7 +690,7 @@ def test_treedb_lifecycle_waits_through_partial_ack_but_persistent_malformed_fai
 
     acknowledgement.write_text("{")
     with pytest.raises(TimeoutError, match="remained malformed"):
-        _wait_for_load_end_ack(str(acknowledgement), 30, timeout=0.03)
+        _wait_for_boundary_ack(str(acknowledgement), "optimize_start", 30, timeout=0.03)
 
 
 def test_treedb_lifecycle_failure_after_acceptance_is_not_retried(monkeypatch: MonkeyPatch, tmp_path) -> None:
