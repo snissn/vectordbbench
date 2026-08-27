@@ -3,6 +3,7 @@ import json
 import pickle
 import sys
 import threading
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from types import ModuleType, SimpleNamespace
@@ -546,6 +547,65 @@ def test_treedb_lifecycle_sidecar_preserves_load_and_optimize_boundaries(monkeyp
     assert sum(record.get("server_accepted", 0) for record in records) == 3
     assert records[-1]["response"]["maintenance"]["root_id"] == 9
     assert all(isinstance(record["timestamp_ns"], int) for record in records)
+
+
+def test_treedb_lifecycle_waits_for_load_end_diagnostics_before_optimize(monkeypatch: MonkeyPatch, tmp_path) -> None:
+    sidecar = tmp_path / "lifecycle.jsonl"
+    acknowledgement = tmp_path / "load-end-diagnostics.json"
+    monkeypatch.setenv("TREEDB_LIFECYCLE_SIDECAR", str(sidecar))
+    monkeypatch.setenv("TREEDB_LIFECYCLE_LOAD_END_ACK", str(acknowledgement))
+    optimize_started = threading.Event()
+
+    class FakeClient:
+        def __init__(self, base_url, timeout=30.0):
+            pass
+
+        def reset_index(self, *args, **kwargs):
+            return SimpleNamespace(index_name="bench", generation=1)
+
+        def optimize_index(self, index_name):
+            optimize_started.set()
+            return SimpleNamespace(root_id=9)
+
+    fake_module = ModuleType("treedb_client")
+    fake_module.Document = object
+    fake_module.TreeDBClient = FakeClient
+    monkeypatch.setitem(sys.modules, "treedb_client", fake_module)
+
+    from vectordb_bench.backend.clients.treedb.treedb import TreeDB
+
+    db = TreeDB(
+        dim=2,
+        db_config={"base_url": "http://127.0.0.1:7120", "index_name": "bench"},
+        db_case_config=TreeDBColumnGraphExactConfig(),
+        drop_old=True,
+    )
+    worker = threading.Thread(target=db.optimize)
+    worker.start()
+    deadline = time.monotonic() + 2
+    load_end = None
+    while time.monotonic() < deadline:
+        if sidecar.exists():
+            records = [json.loads(line) for line in sidecar.read_text().splitlines()]
+            load_end = next((record for record in records if record["event"] == "load_end"), None)
+            if load_end is not None:
+                break
+        time.sleep(0.01)
+
+    assert load_end is not None
+    assert not optimize_started.is_set()
+    acknowledgement.write_text(
+        json.dumps(
+            {
+                "load_end_timestamp_ns": load_end["timestamp_ns"],
+                "sample_timestamp_ns": load_end["timestamp_ns"] + 1,
+            }
+        )
+    )
+    worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert optimize_started.is_set()
 
 
 def test_treedb_lifecycle_failure_after_acceptance_is_not_retried(monkeypatch: MonkeyPatch, tmp_path) -> None:

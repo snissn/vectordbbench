@@ -8,6 +8,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import asdict, is_dataclass
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -29,6 +30,7 @@ _QUANTIZED_ASSET_FAILURE_STATS = (
 _QUERY_EMBEDDING_ENCODINGS = ("json", "f32_le_b64", "f32_le")
 _DOCUMENT_EMBEDDING_ENCODINGS = ("json", "f32_le_b64")
 _LIFECYCLE_SIDECAR_ENV = "TREEDB_LIFECYCLE_SIDECAR"
+_LIFECYCLE_LOAD_END_ACK_ENV = "TREEDB_LIFECYCLE_LOAD_END_ACK"
 
 
 def _jsonable_response(response: Any) -> Any:
@@ -49,8 +51,9 @@ def _jsonable_response(response: Any) -> Any:
     return response
 
 
-def _append_lifecycle_record(path: str, event: str, **values: Any) -> None:
-    record = {"event": event, "timestamp_ns": time.time_ns(), **values}
+def _append_lifecycle_record(path: str, event: str, **values: Any) -> int:
+    timestamp_ns = time.time_ns()
+    record = {"event": event, "timestamp_ns": timestamp_ns, **values}
     payload = (json.dumps(record, separators=(",", ":"), sort_keys=True) + "\n").encode()
     fd = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
     try:
@@ -58,6 +61,27 @@ def _append_lifecycle_record(path: str, event: str, **values: Any) -> None:
             raise OSError("short lifecycle sidecar write")
     finally:
         os.close(fd)
+    return timestamp_ns
+
+
+def _wait_for_load_end_ack(path: str, load_end_ns: int) -> None:
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        try:
+            with Path(path).open(encoding="utf-8") as source:
+                acknowledgement = json.load(source)
+        except FileNotFoundError:
+            time.sleep(0.01)
+            continue
+        if not isinstance(acknowledgement, dict):
+            raise ValueError("TreeDB lifecycle load-end diagnostics acknowledgement must be an object")
+        sample_ns = acknowledgement.get("sample_timestamp_ns")
+        if acknowledgement.get("load_end_timestamp_ns") != load_end_ns:
+            raise RuntimeError("TreeDB lifecycle load-end diagnostics acknowledgement is stale")
+        if not isinstance(sample_ns, int) or isinstance(sample_ns, bool) or sample_ns < load_end_ns:
+            raise RuntimeError("TreeDB lifecycle load-end diagnostics acknowledgement has an invalid sample timestamp")
+        return
+    raise TimeoutError("timed out waiting for TreeDB lifecycle load-end diagnostics")
 
 
 class TreeDB(VectorDB):
@@ -140,9 +164,10 @@ class TreeDB(VectorDB):
         self._clients = threading.local()
         self._lifecycle_lock = threading.Lock()
 
-    def _emit_lifecycle(self, event: str, **values: Any) -> None:
+    def _emit_lifecycle(self, event: str, **values: Any) -> int | None:
         if self._lifecycle_sidecar:
-            _append_lifecycle_record(self._lifecycle_sidecar, event, **values)
+            return _append_lifecycle_record(self._lifecycle_sidecar, event, **values)
+        return None
 
     def _emit_load_start(self) -> None:
         if not self._lifecycle_sidecar or self._lifecycle_load_started:
@@ -239,7 +264,12 @@ class TreeDB(VectorDB):
         return response.upserted, None
 
     def optimize(self, data_size: int | None = None):
-        self._emit_lifecycle("load_end")
+        load_end_ns = self._emit_lifecycle("load_end")
+        acknowledgement = os.environ.get(_LIFECYCLE_LOAD_END_ACK_ENV)
+        if acknowledgement:
+            if load_end_ns is None:
+                raise RuntimeError("TreeDB lifecycle load-end acknowledgement requires the lifecycle sidecar")
+            _wait_for_load_end_ack(acknowledgement, load_end_ns)
         self._emit_lifecycle("optimize_start")
         response = self.client.optimize_index(self.index_name)
         self._emit_lifecycle("optimize_end", response=_jsonable_response(response))
