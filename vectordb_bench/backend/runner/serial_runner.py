@@ -67,6 +67,9 @@ class SerialInsertRunner:
                     )
                     already_insert_count += insert_count
                     if error is not None:
+                        if getattr(error, "non_retryable", False):
+                            msg = f"Non-retryable insert failure after {already_insert_count} inserted rows: {error}"
+                            raise RuntimeError(msg) from error
                         retry_count += 1
                         time.sleep(10)
 

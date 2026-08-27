@@ -41,6 +41,9 @@ class RatedMultiThreadingInsertRunner:
             inserted, error = db.insert_embeddings(emb, metadata)
             if error is not None:
                 log.warning(f"Insert Failed, try_idx={retry_idx}, Exception: {error}")
+                if getattr(error, "non_retryable", False):
+                    msg = f"Non-retryable insert failure after {inserted} inserted rows: {error}"
+                    raise RuntimeError(msg) from error
                 retry_idx += 1
                 if retry_idx > config.MAX_INSERT_RETRY:
                     msg = f"Insert failed and retried more than {config.MAX_INSERT_RETRY} times"

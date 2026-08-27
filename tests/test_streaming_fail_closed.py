@@ -11,6 +11,7 @@ from pandas import DataFrame
 from vectordb_bench import config
 from vectordb_bench.backend.runner.rate_runner import RatedMultiThreadingInsertRunner
 from vectordb_bench.backend.runner.read_write_runner import ReadWriteRunner
+from vectordb_bench.backend.runner.serial_runner import SerialInsertRunner
 from vectordb_bench.backend.task_runner import CaseRunner
 from vectordb_bench.metric import Metric
 
@@ -98,6 +99,56 @@ def test_fixed_rate_runner_counts_successful_retry_acknowledgement(monkeypatch: 
     monkeypatch.setattr("vectordb_bench.backend.runner.rate_runner.time.sleep", lambda _seconds: None)
 
     assert runner.send_insert_task(db, [[0.0]] * 4, ["0", "1", "2", "3"]) == 2
+
+
+def test_fixed_rate_runner_does_not_retry_non_retryable_partial_acceptance(monkeypatch: pytest.MonkeyPatch) -> None:
+    class AcceptedButUninstrumented(RuntimeError):
+        non_retryable = True
+
+    calls = []
+
+    def insert(_emb, _metadata):
+        calls.append(1)
+        return 2, AcceptedButUninstrumented("sidecar full")
+
+    db = SimpleNamespace(name="Test", insert_embeddings=insert)
+    runner = RatedMultiThreadingInsertRunner(rate=100, db=db, dataset_iter=iter(()))
+    monkeypatch.setattr(
+        "vectordb_bench.backend.runner.rate_runner.time.sleep",
+        lambda _seconds: pytest.fail("non-retryable failure slept before abort"),
+    )
+
+    with pytest.raises(RuntimeError, match="after 2 inserted rows"):
+        runner.send_insert_task(db, [[0.0], [1.0]], ["0", "1"])
+
+    assert calls == [1]
+
+
+def test_serial_runner_does_not_retry_non_retryable_partial_acceptance(monkeypatch: pytest.MonkeyPatch) -> None:
+    class AcceptedButUninstrumented(RuntimeError):
+        non_retryable = True
+
+    calls = []
+
+    @contextmanager
+    def init():
+        yield
+
+    def insert_embeddings(*, embeddings, metadata):
+        calls.append((embeddings, metadata))
+        return 2, AcceptedButUninstrumented("sidecar full")
+
+    db = SimpleNamespace(name="Test", init=init, insert_embeddings=insert_embeddings)
+    runner = SerialInsertRunner(db=db, dataset=SimpleNamespace(), normalize=False)
+    monkeypatch.setattr(
+        "vectordb_bench.backend.runner.serial_runner.time.sleep",
+        lambda _seconds: pytest.fail("non-retryable failure slept before abort"),
+    )
+
+    with pytest.raises(RuntimeError, match="after 2 inserted rows"):
+        runner.endless_insert_data([[0.0], [1.0]], [0, 1])
+
+    assert len(calls) == 1
 
 
 def test_streaming_search_failure_stops_insert_and_parent_promptly(monkeypatch: pytest.MonkeyPatch) -> None:
