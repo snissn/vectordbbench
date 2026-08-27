@@ -1,8 +1,11 @@
 import base64
+import json
 import pickle
 import sys
 import threading
+import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 from types import ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
@@ -419,6 +422,405 @@ def test_treedb_vector_index_inserts_defer_rebuild_until_optimize(monkeypatch: M
     assert count == 1
     assert calls[0][0] == "bench"
     assert calls[0][2] is True
+
+
+def test_treedb_lifecycle_sidecar_is_absent_by_default(monkeypatch: MonkeyPatch, tmp_path) -> None:
+    sidecar = tmp_path / "lifecycle.jsonl"
+    monkeypatch.delenv("TREEDB_LIFECYCLE_SIDECAR", raising=False)
+
+    class FakeDocument:
+        def __init__(self, id, embedding):
+            self.id = id
+            self.embedding = embedding
+
+    class FakeClient:
+        def __init__(self, base_url, timeout=30.0):
+            pass
+
+        def reset_index(self, *args, **kwargs):
+            return SimpleNamespace(index_name="bench", generation=1)
+
+        def upsert_documents(self, index_name, documents, *, defer_vector_index_rebuild=False):
+            return SimpleNamespace(upserted=len(documents))
+
+        def optimize_index(self, index_name):
+            return SimpleNamespace(root_id=9)
+
+    fake_module = ModuleType("treedb_client")
+    fake_module.Document = FakeDocument
+    fake_module.TreeDBClient = FakeClient
+    monkeypatch.setitem(sys.modules, "treedb_client", fake_module)
+
+    from vectordb_bench.backend.clients.treedb.treedb import TreeDB
+
+    db = TreeDB(
+        dim=2,
+        db_config={"base_url": "http://127.0.0.1:7120", "index_name": "bench"},
+        db_case_config=TreeDBColumnGraphExactConfig(),
+        drop_old=True,
+    )
+    assert db.insert_embeddings([[1.0, 0.0]], [7]) == (1, None)
+    db.optimize()
+
+    assert not sidecar.exists()
+
+
+def test_treedb_lifecycle_sidecar_preserves_load_and_optimize_boundaries(monkeypatch: MonkeyPatch, tmp_path) -> None:
+    sidecar = tmp_path / "lifecycle.jsonl"
+    monkeypatch.setenv("TREEDB_LIFECYCLE_SIDECAR", str(sidecar))
+
+    class FakeDocument:
+        def __init__(self, id, embedding):
+            self.id = id
+            self.embedding = embedding
+
+    class FakeResponse:
+        def __init__(self, **values):
+            self.values = values
+
+        def model_dump(self, *, mode):
+            assert mode == "json"
+            return self.values
+
+    class FakeClient:
+        def __init__(self, base_url, timeout=30.0):
+            pass
+
+        def reset_index(self, *args, **kwargs):
+            return FakeResponse(index_name="bench", generation=1)
+
+        def upsert_documents(self, index_name, documents, *, defer_vector_index_rebuild=False):
+            return SimpleNamespace(upserted=len(documents))
+
+        def optimize_index(self, index_name):
+            return FakeResponse(
+                index_name=index_name,
+                generation=2,
+                maintenance={"root_id": 9},
+                timing={"cache_prime_seconds": 0.5, "cache_warm_seconds": 0.25},
+            )
+
+    fake_module = ModuleType("treedb_client")
+    fake_module.Document = FakeDocument
+    fake_module.TreeDBClient = FakeClient
+    monkeypatch.setitem(sys.modules, "treedb_client", fake_module)
+
+    from vectordb_bench.backend.clients.treedb.treedb import TreeDB
+
+    db = TreeDB(
+        dim=2,
+        db_config={"base_url": "http://127.0.0.1:7120", "index_name": "bench"},
+        db_case_config=TreeDBColumnGraphExactConfig(),
+        drop_old=True,
+    )
+    start = threading.Barrier(2)
+    results = []
+
+    def insert(embeddings, metadata):
+        start.wait(timeout=2)
+        results.append(db.insert_embeddings(embeddings, metadata))
+
+    workers = [
+        threading.Thread(target=insert, args=([[1.0, 0.0], [0.0, 1.0]], [7, 8])),
+        threading.Thread(target=insert, args=([[0.5, 0.5]], [9])),
+    ]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=2)
+    assert sorted(results) == [(1, None), (2, None)]
+
+    restored = pickle.loads(pickle.dumps(db))  # noqa: S301
+    restored.optimize()
+
+    records = [json.loads(line) for line in sidecar.read_text().splitlines()]
+    assert [record["event"] for record in records] == [
+        "reset",
+        "load_start",
+        "batch_accepted",
+        "batch_accepted",
+        "load_end",
+        "optimize_start",
+        "optimize_end",
+    ]
+    assert sum(record.get("client_sent", 0) for record in records) == 3
+    assert sum(record.get("server_accepted", 0) for record in records) == 3
+    assert records[-1]["response"]["maintenance"]["root_id"] == 9
+    assert all(isinstance(record["timestamp_ns"], int) for record in records)
+
+
+def test_treedb_lifecycle_waits_for_exact_diagnostics_at_each_optimize_boundary(
+    monkeypatch: MonkeyPatch, tmp_path
+) -> None:
+    sidecar = tmp_path / "lifecycle.jsonl"
+    acknowledgement = tmp_path / "lifecycle-boundary-diagnostics.json"
+    monkeypatch.setenv("TREEDB_LIFECYCLE_SIDECAR", str(sidecar))
+    monkeypatch.setenv("TREEDB_LIFECYCLE_BOUNDARY_ACK", str(acknowledgement))
+    optimize_started = threading.Event()
+    optimize_results = []
+
+    class FakeClient:
+        def __init__(self, base_url, timeout=30.0):
+            pass
+
+        def reset_index(self, *args, **kwargs):
+            return SimpleNamespace(index_name="bench", generation=1)
+
+        def optimize_index(self, index_name):
+            optimize_started.set()
+            time.sleep(0.02)
+            return SimpleNamespace(root_id=9)
+
+    fake_module = ModuleType("treedb_client")
+    fake_module.Document = object
+    fake_module.TreeDBClient = FakeClient
+    monkeypatch.setitem(sys.modules, "treedb_client", fake_module)
+
+    from vectordb_bench.backend.clients.treedb.treedb import TreeDB
+
+    db = TreeDB(
+        dim=2,
+        db_config={"base_url": "http://127.0.0.1:7120", "index_name": "bench"},
+        db_case_config=TreeDBColumnGraphExactConfig(),
+        drop_old=True,
+    )
+    started = time.perf_counter()
+    worker = threading.Thread(target=lambda: optimize_results.append(db.optimize()))
+    worker.start()
+
+    def acknowledge(event: str) -> None:
+        deadline = time.monotonic() + 2
+        record = None
+        while time.monotonic() < deadline:
+            if sidecar.exists():
+                records = [json.loads(line) for line in sidecar.read_text().splitlines()]
+                record = next((item for item in records if item["event"] == event), None)
+                if record is not None:
+                    break
+            time.sleep(0.01)
+        assert record is not None
+        time.sleep(0.03)
+        acknowledgement.write_text(
+            json.dumps(
+                {
+                    "boundary": event,
+                    "boundary_timestamp_ns": record["timestamp_ns"],
+                    "sample_timestamp_ns": record["timestamp_ns"] + 1,
+                }
+            )
+        )
+
+    acknowledge("load_end")
+    assert not optimize_started.is_set()
+    acknowledge("optimize_start")
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline and not optimize_started.is_set():
+        time.sleep(0.01)
+    assert optimize_started.is_set()
+    acknowledge("optimize_end")
+    worker.join(timeout=2)
+    wall_duration = time.perf_counter() - started
+
+    assert not worker.is_alive()
+    assert len(optimize_results) == 1
+    assert optimize_results[0].duration_seconds == pytest.approx(0.02, abs=0.02)
+    assert wall_duration - optimize_results[0].duration_seconds >= 0.06
+    assert db.optimize_timeout_allowance == 90.0
+
+
+def test_treedb_lifecycle_waits_at_real_search_boundaries(monkeypatch: MonkeyPatch, tmp_path) -> None:
+    sidecar = tmp_path / "lifecycle.jsonl"
+    acknowledgement = tmp_path / "lifecycle-boundary-diagnostics.json"
+    monkeypatch.setenv("TREEDB_LIFECYCLE_SIDECAR", str(sidecar))
+    monkeypatch.setenv("TREEDB_LIFECYCLE_BOUNDARY_ACK", str(acknowledgement))
+
+    fake_module = ModuleType("treedb_client")
+    fake_module.Document = object
+    fake_module.TreeDBClient = type(
+        "FakeClient",
+        (),
+        {
+            "__init__": lambda self, *args, **kwargs: None,
+            "create_index": lambda self, *args, **kwargs: None,
+            "close": lambda self: None,
+        },
+    )
+    monkeypatch.setitem(sys.modules, "treedb_client", fake_module)
+
+    from vectordb_bench.backend.clients.treedb.treedb import TreeDB
+
+    db = TreeDB(
+        dim=2,
+        db_config={"base_url": "http://127.0.0.1:7120", "index_name": "bench"},
+        db_case_config=TreeDBColumnGraphExactConfig(),
+    )
+
+    for boundary in ("cache_prime", "cache_warm"):
+        worker = threading.Thread(target=db.complete_lifecycle_search_phase, args=(boundary,))
+        worker.start()
+        deadline = time.monotonic() + 2
+        record = None
+        while time.monotonic() < deadline:
+            if not sidecar.exists():
+                time.sleep(0.01)
+                continue
+            records = [json.loads(line) for line in sidecar.read_text().splitlines()]
+            record = next((item for item in records if item["event"] == boundary), None)
+            if record is not None:
+                break
+            time.sleep(0.01)
+        assert record is not None
+        assert worker.is_alive()
+        acknowledgement.write_text(
+            json.dumps(
+                {
+                    "boundary": boundary,
+                    "boundary_timestamp_ns": record["timestamp_ns"],
+                    "sample_timestamp_ns": record["timestamp_ns"] + 1,
+                }
+            )
+        )
+        worker.join(timeout=2)
+        assert not worker.is_alive()
+
+
+def test_treedb_lifecycle_ignores_stale_ack_until_current_run_replaces_it(tmp_path) -> None:
+    from vectordb_bench.backend.clients.treedb.treedb import _wait_for_boundary_ack
+
+    acknowledgement = tmp_path / "lifecycle-boundary-diagnostics.json"
+    acknowledgement.write_text(
+        json.dumps(
+            {
+                "boundary": "load_end",
+                "boundary_timestamp_ns": 10,
+                "sample_timestamp_ns": 11,
+            }
+        )
+    )
+    completed = threading.Event()
+
+    def wait() -> None:
+        _wait_for_boundary_ack(str(acknowledgement), "load_end", 20)
+        completed.set()
+
+    worker = threading.Thread(target=wait)
+    worker.start()
+    time.sleep(0.03)
+    assert not completed.is_set()
+
+    acknowledgement.write_text(
+        json.dumps(
+            {
+                "boundary": "load_end",
+                "boundary_timestamp_ns": 20,
+                "sample_timestamp_ns": 21,
+            }
+        )
+    )
+    worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert completed.is_set()
+
+
+def test_treedb_lifecycle_waits_through_partial_ack_but_persistent_malformed_fails_closed(tmp_path) -> None:
+    from vectordb_bench.backend.clients.treedb.treedb import _wait_for_boundary_ack
+
+    acknowledgement = tmp_path / "lifecycle-boundary-diagnostics.json"
+    acknowledgement.write_text('{"boundary":')
+    completed = threading.Event()
+
+    worker = threading.Thread(
+        target=lambda: (
+            _wait_for_boundary_ack(str(acknowledgement), "load_end", 20, timeout=1),
+            completed.set(),
+        )
+    )
+    worker.start()
+    time.sleep(0.03)
+    assert not completed.is_set()
+    acknowledgement.write_text(
+        json.dumps(
+            {
+                "boundary": "load_end",
+                "boundary_timestamp_ns": 20,
+                "sample_timestamp_ns": 21,
+            }
+        )
+    )
+    worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert completed.is_set()
+
+    acknowledgement.write_text("{")
+    with pytest.raises(TimeoutError, match="remained malformed"):
+        _wait_for_boundary_ack(str(acknowledgement), "optimize_start", 30, timeout=0.03)
+
+
+def test_treedb_lifecycle_failure_after_acceptance_is_not_retried(monkeypatch: MonkeyPatch, tmp_path) -> None:
+    monkeypatch.setenv("TREEDB_LIFECYCLE_SIDECAR", str(tmp_path / "lifecycle.jsonl"))
+    calls = []
+
+    class FakeDocument:
+        def __init__(self, id, embedding):
+            self.id = id
+            self.embedding = embedding
+
+    class FakeClient:
+        def __init__(self, base_url, timeout=30.0):
+            pass
+
+        def create_index(self, *args, **kwargs):
+            pass
+
+        def upsert_documents(self, index_name, documents, *, defer_vector_index_rebuild=False):
+            calls.append([document.id for document in documents])
+            return SimpleNamespace(upserted=len(documents))
+
+    fake_module = ModuleType("treedb_client")
+    fake_module.Document = FakeDocument
+    fake_module.TreeDBClient = FakeClient
+    monkeypatch.setitem(sys.modules, "treedb_client", fake_module)
+
+    from vectordb_bench.backend.clients.treedb import treedb as treedb_module
+
+    real_append = treedb_module._append_lifecycle_record
+
+    def fail_after_acceptance(path, event, **values):
+        if event == "batch_accepted":
+            raise OSError("sidecar full")
+        return real_append(path, event, **values)
+
+    monkeypatch.setattr(treedb_module, "_append_lifecycle_record", fail_after_acceptance)
+    db = treedb_module.TreeDB(
+        dim=2,
+        db_config={"base_url": "http://127.0.0.1:7120", "index_name": "bench"},
+        db_case_config=TreeDBColumnGraphExactConfig(),
+    )
+    runner = ConcurrentInsertRunner.__new__(ConcurrentInsertRunner)
+
+    with pytest.raises(RuntimeError, match="after 2 inserted rows"):
+        runner._insert_batch_with_retry(db, [[1.0, 0.0], [0.0, 1.0]], [7, 8])
+
+    assert calls == [["7", "8"]]
+
+
+def test_treedb_lifecycle_sidecar_serializes_nested_client_dataclasses(monkeypatch: MonkeyPatch, tmp_path) -> None:
+    from vectordb_bench.backend.clients.treedb.treedb import _append_lifecycle_record, _jsonable_response
+
+    @dataclass
+    class Status:
+        root_id: int
+
+    @dataclass
+    class Response:
+        status: Status
+
+    path = tmp_path / "lifecycle.jsonl"
+    _append_lifecycle_record(str(path), "optimize_end", response=_jsonable_response(Response(Status(9))))
+
+    assert json.loads(path.read_text())["response"] == {"status": {"root_id": 9}}
 
 
 def test_treedb_compact_document_insert_sends_exact_f32le_bytes(monkeypatch: MonkeyPatch) -> None:

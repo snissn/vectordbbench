@@ -92,8 +92,9 @@ class ReadWriteRunner(MultiProcessingSearchRunner, RatedMultiThreadingInsertRunn
         """Optimize needs to run in differenct process for pymilvus schema recursion problem"""
         with self.db.init():
             log.info("Search after write - Optimize start")
-            self.db.optimize(data_size=self.data_volume)
+            result = self.db.optimize(data_size=self.data_volume)
             log.info("Search after write - Optimize finished")
+        return result if isinstance(result, api.OptimizeResult) else None
 
     def run_search(self, perc: int, row_count: int | None = None):
         row_count = self.data_volume if row_count is None else row_count
@@ -177,7 +178,8 @@ class ReadWriteRunner(MultiProcessingSearchRunner, RatedMultiThreadingInsertRunn
                     # Wait for read_write_futures finishing and do optimize and search
                     if self.optimize_after_write:
                         op_future = executor.submit(self.run_optimize)
-                        _, m.optimize_duration = op_future.result()
+                        optimize_result, wall_duration = op_future.result()
+                        m.optimize_duration = api.reported_optimize_duration(optimize_result, wall_duration)
                         log.info(f"Optimize cost {m.optimize_duration}s")
                         optimized_search_future = executor.submit(self.run_search, 110, completed_rows.value)
                         optimized_search_res = optimized_search_future.result()

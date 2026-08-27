@@ -1,16 +1,21 @@
 import base64
+import json
 import logging
 import math
+import os
 import threading
 import time
 from contextlib import contextmanager
+from dataclasses import asdict, is_dataclass
+from enum import Enum
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from vectordb_bench.backend.filter import Filter, FilterOp
 
-from ..api import MetricType, VectorDB
+from ..api import MetricType, OptimizeResult, PartialInsertError, VectorDB
 from .config import TreeDBHNSWConfig
 
 log = logging.getLogger(__name__)
@@ -24,6 +29,72 @@ _QUANTIZED_ASSET_FAILURE_STATS = (
 )
 _QUERY_EMBEDDING_ENCODINGS = ("json", "f32_le_b64", "f32_le")
 _DOCUMENT_EMBEDDING_ENCODINGS = ("json", "f32_le_b64")
+_LIFECYCLE_SIDECAR_ENV = "TREEDB_LIFECYCLE_SIDECAR"
+_LIFECYCLE_BOUNDARY_ACK_ENV = "TREEDB_LIFECYCLE_BOUNDARY_ACK"
+_OPTIMIZE_LIFECYCLE_BOUNDARIES = ("load_end", "optimize_start", "optimize_end")
+_SEARCH_LIFECYCLE_BOUNDARIES = ("cache_prime", "cache_warm")
+_LIFECYCLE_BOUNDARY_ACK_TIMEOUT = 30.0
+
+
+def _jsonable_response(response: Any) -> Any:
+    if is_dataclass(response):
+        return _jsonable_response(asdict(response))
+    if isinstance(response, Enum):
+        return response.value
+    if isinstance(response, dict):
+        return {key: _jsonable_response(value) for key, value in response.items()}
+    if isinstance(response, (list, tuple)):
+        return [_jsonable_response(value) for value in response]
+    if callable(getattr(response, "model_dump", None)):
+        return _jsonable_response(response.model_dump(mode="json"))
+    if callable(getattr(response, "dict", None)):
+        return _jsonable_response(response.dict())
+    if hasattr(response, "__dict__"):
+        return _jsonable_response(vars(response))
+    return response
+
+
+def _append_lifecycle_record(path: str, event: str, **values: Any) -> int:
+    timestamp_ns = time.time_ns()
+    record = {"event": event, "timestamp_ns": timestamp_ns, **values}
+    payload = (json.dumps(record, separators=(",", ":"), sort_keys=True) + "\n").encode()
+    fd = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+    try:
+        if os.write(fd, payload) != len(payload):
+            raise OSError("short lifecycle sidecar write")
+    finally:
+        os.close(fd)
+    return timestamp_ns
+
+
+def _wait_for_boundary_ack(
+    path: str, boundary: str, boundary_ns: int, timeout: float = _LIFECYCLE_BOUNDARY_ACK_TIMEOUT
+) -> None:
+    deadline = time.monotonic() + timeout
+    last_decode_error: json.JSONDecodeError | None = None
+    while time.monotonic() < deadline:
+        try:
+            with Path(path).open(encoding="utf-8") as source:
+                acknowledgement = json.load(source)
+        except FileNotFoundError:
+            time.sleep(0.01)
+            continue
+        except json.JSONDecodeError as exc:
+            last_decode_error = exc
+            time.sleep(0.01)
+            continue
+        last_decode_error = None
+        if not isinstance(acknowledgement, dict):
+            raise ValueError("TreeDB lifecycle diagnostics acknowledgement must be an object")
+        if acknowledgement.get("boundary") != boundary or acknowledgement.get("boundary_timestamp_ns") != boundary_ns:
+            time.sleep(0.01)
+            continue
+        sample_ns = acknowledgement.get("sample_timestamp_ns")
+        if not isinstance(sample_ns, int) or isinstance(sample_ns, bool) or sample_ns < boundary_ns:
+            raise RuntimeError("TreeDB lifecycle diagnostics acknowledgement has an invalid sample timestamp")
+        return
+    detail = f": acknowledgement remained malformed ({last_decode_error})" if last_decode_error else ""
+    raise TimeoutError(f"timed out waiting for TreeDB lifecycle {boundary} diagnostics{detail}")
 
 
 class TreeDB(VectorDB):
@@ -58,6 +129,14 @@ class TreeDB(VectorDB):
         self.live_ann_visibility_poll_interval = db_config.get("live_ann_visibility_poll_interval", 0.05)
         self._client = None
         self._clients = threading.local()
+        self._lifecycle_sidecar = os.environ.get(_LIFECYCLE_SIDECAR_ENV)
+        self.optimize_timeout_allowance = (
+            len(_OPTIMIZE_LIFECYCLE_BOUNDARIES) * _LIFECYCLE_BOUNDARY_ACK_TIMEOUT
+            if os.environ.get(_LIFECYCLE_BOUNDARY_ACK_ENV)
+            else 0.0
+        )
+        self._lifecycle_lock = threading.Lock()
+        self._lifecycle_load_started = False
         self._search_param = db_case_config.search_param()
         self._metric = self._parse_metric(db_case_config.metric_type)
         self._vector_index_options = (
@@ -73,13 +152,14 @@ class TreeDB(VectorDB):
         client = self._new_client()
         try:
             if drop_old:
-                client.reset_index(
+                response = client.reset_index(
                     self.index_name,
                     dimension=self.dim,
                     metric=self._metric,
                     drop_old=True,
                     vector_index_options=self._vector_index_options,
                 )
+                self._emit_lifecycle("reset", response=_jsonable_response(response))
             else:
                 client.create_index(
                     self.index_name,
@@ -94,11 +174,26 @@ class TreeDB(VectorDB):
         state = self.__dict__.copy()
         state["_client"] = None
         state.pop("_clients", None)
+        state.pop("_lifecycle_lock", None)
         return state
 
     def __setstate__(self, state):
         self.__dict__.update(state)
         self._clients = threading.local()
+        self._lifecycle_lock = threading.Lock()
+
+    def _emit_lifecycle(self, event: str, **values: Any) -> int | None:
+        if self._lifecycle_sidecar:
+            return _append_lifecycle_record(self._lifecycle_sidecar, event, **values)
+        return None
+
+    def _emit_load_start(self) -> None:
+        if not self._lifecycle_sidecar or self._lifecycle_load_started:
+            return
+        with self._lifecycle_lock:
+            if not self._lifecycle_load_started:
+                self._emit_lifecycle("load_start")
+                self._lifecycle_load_started = True
 
     def _new_client(self, timeout: float | None = None):
         from treedb_client import TreeDBClient
@@ -144,6 +239,7 @@ class TreeDB(VectorDB):
         **kwargs: Any,
     ) -> tuple[int, Exception | None]:
         try:
+            self._emit_load_start()
             if self.document_embedding_encoding == "f32_le_b64":
                 documents = [
                     {
@@ -166,13 +262,51 @@ class TreeDB(VectorDB):
                 documents,
                 defer_vector_index_rebuild=bool(self._search_param.get("use_vector_index")),
             )
-            return response.upserted, None
         except Exception as exc:  # noqa: BLE001
             log.warning("Failed to insert embeddings into TreeDB index %s: %s", self.index_name, exc)
             return 0, exc
+        try:
+            self._emit_lifecycle(
+                "batch_accepted",
+                client_sent=len(metadata),
+                server_accepted=response.upserted,
+            )
+        except Exception as exc:  # noqa: BLE001
+            error = PartialInsertError(
+                "TreeDB accepted the batch but lifecycle instrumentation failed",
+                inserted_count=response.upserted,
+                cause=exc,
+            )
+            log.warning("TreeDB lifecycle instrumentation failed after accepting %d rows: %s", response.upserted, exc)
+            return response.upserted, error
+        return response.upserted, None
 
     def optimize(self, data_size: int | None = None):
-        self.client.optimize_index(self.index_name)
+        self._emit_lifecycle_boundary("load_end")
+        self._emit_lifecycle_boundary("optimize_start")
+        started = time.perf_counter()
+        response = self.client.optimize_index(self.index_name)
+        duration = time.perf_counter() - started
+        self._emit_lifecycle_boundary("optimize_end", response=_jsonable_response(response))
+        return OptimizeResult(duration_seconds=duration)
+
+    @property
+    def lifecycle_search_boundaries_enabled(self) -> bool:
+        return bool(self._lifecycle_sidecar)
+
+    def complete_lifecycle_search_phase(self, event: str) -> None:
+        if event not in _SEARCH_LIFECYCLE_BOUNDARIES:
+            msg = f"unsupported TreeDB lifecycle search boundary {event!r}"
+            raise ValueError(msg)
+        self._emit_lifecycle_boundary(event)
+
+    def _emit_lifecycle_boundary(self, event: str, **values: Any) -> None:
+        timestamp_ns = self._emit_lifecycle(event, **values)
+        acknowledgement = os.environ.get(_LIFECYCLE_BOUNDARY_ACK_ENV)
+        if acknowledgement:
+            if timestamp_ns is None:
+                raise RuntimeError("TreeDB lifecycle diagnostics acknowledgement requires the lifecycle sidecar")
+            _wait_for_boundary_ack(acknowledgement, event, timestamp_ns)
 
     @property
     def requires_live_ann_preflight(self) -> bool:

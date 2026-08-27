@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import ClassVar
 
@@ -66,6 +67,17 @@ class SQType(StrEnum):
 
 class NonRetryableInsertError(RuntimeError):
     non_retryable = True
+
+
+@dataclass(frozen=True)
+class OptimizeResult:
+    """Database-only optimize duration for adapters with untimed coordination."""
+
+    duration_seconds: float
+
+
+def reported_optimize_duration(result: object, wall_duration: float) -> float:
+    return result.duration_seconds if isinstance(result, OptimizeResult) else wall_duration
 
 
 class PartialInsertError(NonRetryableInsertError):
@@ -186,6 +198,10 @@ class VectorDB(ABC):
     worker_owned_clients: bool = False
     # Opt in only when insert_embeddings accepts a stacked NumPy array.
     accepts_numpy_embeddings: bool = False
+    # Extra bounded wall time used only for adapter coordination outside the
+    # database optimize duration. The measured database duration is still
+    # checked against the case's optimize timeout.
+    optimize_timeout_allowance: float = 0.0
 
     @classmethod
     def filter_supported(cls, filters: Filter) -> bool:
@@ -310,5 +326,7 @@ class VectorDB(ABC):
 
         Time(insert the dataset) + Time(optimize) will be recorded as "load_duration" metric
         Optimize's execution time is limited, the limited time is based on cases.
+        Adapters with untimed coordination may return OptimizeResult with the
+        database-only duration; all other return values retain wall timing.
         """
         raise NotImplementedError

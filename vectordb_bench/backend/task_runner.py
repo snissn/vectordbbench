@@ -308,6 +308,13 @@ class CaseRunner(BaseModel):
                     log.info("Data loading skipped")
             if TaskStage.SEARCH_SERIAL in self.config.stages or TaskStage.SEARCH_CONCURRENT in self.config.stages:
                 self._init_search_runner()
+                lifecycle_search = getattr(self.db, "lifecycle_search_boundaries_enabled", False)
+                if lifecycle_search:
+                    if not {TaskStage.SEARCH_SERIAL, TaskStage.SEARCH_CONCURRENT}.issubset(self.config.stages):
+                        raise RuntimeError("TreeDB lifecycle requires serial and concurrent search phases")
+                    search_results = self._serial_search()
+                    m.recall, m.ndcg, m.serial_latency_p99, m.serial_latency_p95 = search_results
+                    self.db.complete_lifecycle_search_phase("cache_prime")
                 if TaskStage.SEARCH_CONCURRENT in self.config.stages:
                     search_results = self._conc_search()
                     (
@@ -318,7 +325,9 @@ class CaseRunner(BaseModel):
                         m.conc_latency_p95_list,
                         m.conc_latency_avg_list,
                     ) = search_results
-                if TaskStage.SEARCH_SERIAL in self.config.stages:
+                    if lifecycle_search:
+                        self.db.complete_lifecycle_search_phase("cache_warm")
+                if not lifecycle_search and TaskStage.SEARCH_SERIAL in self.config.stages:
                     search_results = self._serial_search()
                     m.recall, m.ndcg, m.serial_latency_p99, m.serial_latency_p95 = search_results
             m.payload_profile = self.ca.payload_profile.value
@@ -502,22 +511,30 @@ class CaseRunner(BaseModel):
             self.stop()
 
     @utils.time_it
-    def _optimize_task(self) -> None:
+    def _optimize_task(self) -> api.OptimizeResult | None:
         with self.db.init():
-            self.db.optimize(data_size=self.ca.dataset.data.size)
+            result = self.db.optimize(data_size=self.ca.dataset.data.size)
+        return result if isinstance(result, api.OptimizeResult) else None
 
     def _optimize(self) -> float:
+        timeout = self.ca.optimize_timeout
+        allowance = max(0.0, self.db.optimize_timeout_allowance)
         with concurrent.futures.ProcessPoolExecutor(max_workers=1) as executor:
             future = executor.submit(self._optimize_task)
             try:
-                return future.result(timeout=self.ca.optimize_timeout)[1]
+                result, wall_duration = future.result(timeout=None if timeout is None else timeout + allowance)
             except TimeoutError as e:
-                log.warning(f"VectorDB optimize timeout in {self.ca.optimize_timeout}")
+                log.warning(f"VectorDB optimize timeout in {timeout}")
                 kill_proc_tree(pids=list(executor._processes.keys()))
                 raise PerformanceTimeoutError from e
             except Exception as e:
                 log.warning(f"VectorDB optimize error: {e}")
                 raise e from None
+        duration = api.reported_optimize_duration(result, wall_duration)
+        if timeout is not None and duration > timeout:
+            log.warning(f"VectorDB optimize timeout in {timeout}")
+            raise PerformanceTimeoutError
+        return duration
 
     def _init_search_runner(self):
         if self.normalize:
