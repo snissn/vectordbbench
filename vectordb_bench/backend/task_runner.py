@@ -308,6 +308,13 @@ class CaseRunner(BaseModel):
                     log.info("Data loading skipped")
             if TaskStage.SEARCH_SERIAL in self.config.stages or TaskStage.SEARCH_CONCURRENT in self.config.stages:
                 self._init_search_runner()
+                lifecycle_search = getattr(self.db, "lifecycle_search_boundaries_enabled", False)
+                if lifecycle_search:
+                    if not {TaskStage.SEARCH_SERIAL, TaskStage.SEARCH_CONCURRENT}.issubset(self.config.stages):
+                        raise RuntimeError("TreeDB lifecycle requires serial and concurrent search phases")
+                    search_results = self._serial_search()
+                    m.recall, m.ndcg, m.serial_latency_p99, m.serial_latency_p95 = search_results
+                    self.db.complete_lifecycle_search_phase("cache_prime")
                 if TaskStage.SEARCH_CONCURRENT in self.config.stages:
                     search_results = self._conc_search()
                     (
@@ -318,7 +325,9 @@ class CaseRunner(BaseModel):
                         m.conc_latency_p95_list,
                         m.conc_latency_avg_list,
                     ) = search_results
-                if TaskStage.SEARCH_SERIAL in self.config.stages:
+                    if lifecycle_search:
+                        self.db.complete_lifecycle_search_phase("cache_warm")
+                if not lifecycle_search and TaskStage.SEARCH_SERIAL in self.config.stages:
                     search_results = self._serial_search()
                     m.recall, m.ndcg, m.serial_latency_p99, m.serial_latency_p95 = search_results
             m.payload_profile = self.ca.payload_profile.value

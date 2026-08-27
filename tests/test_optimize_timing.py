@@ -83,6 +83,103 @@ def test_performance_load_duration_uses_database_optimize_duration() -> None:
     assert metric.load_duration == 1.27
 
 
+def test_lifecycle_search_records_real_serial_then_concurrent_boundaries() -> None:
+    calls = []
+    runner = object.__new__(CaseRunner)
+
+    def record_boundary(boundary: str) -> None:
+        calls.append(boundary)
+
+    db = SimpleNamespace(
+        lifecycle_search_boundaries_enabled=True,
+        complete_lifecycle_search_phase=record_boundary,
+    )
+    object.__setattr__(runner, "db", db)
+    object.__setattr__(
+        runner,
+        "config",
+        SimpleNamespace(
+            stages={TaskStage.SEARCH_SERIAL, TaskStage.SEARCH_CONCURRENT},
+            case_config=SimpleNamespace(k=10),
+        ),
+    )
+    object.__setattr__(
+        runner,
+        "ca",
+        SimpleNamespace(
+            payload_profile=SimpleNamespace(value="ids_only"),
+            estimated_payload_bytes_per_query=lambda _k: 0,
+        ),
+    )
+    object.__setattr__(runner, "_init_search_runner", lambda: calls.append("init"))
+    object.__setattr__(runner, "_serial_search", lambda: calls.append("serial") or (1, 1, 1, 1))
+    object.__setattr__(
+        runner,
+        "_conc_search",
+        lambda: calls.append("concurrent") or (1, [], [], [], [], []),
+    )
+
+    runner._run_perf_case(drop_old=False)
+
+    assert calls == ["init", "serial", "cache_prime", "concurrent", "cache_warm"]
+
+
+def test_default_search_order_is_unchanged() -> None:
+    calls = []
+    runner = object.__new__(CaseRunner)
+    object.__setattr__(runner, "db", SimpleNamespace())
+    object.__setattr__(
+        runner,
+        "config",
+        SimpleNamespace(
+            stages={TaskStage.SEARCH_SERIAL, TaskStage.SEARCH_CONCURRENT},
+            case_config=SimpleNamespace(k=10),
+        ),
+    )
+    object.__setattr__(
+        runner,
+        "ca",
+        SimpleNamespace(
+            payload_profile=SimpleNamespace(value="ids_only"),
+            estimated_payload_bytes_per_query=lambda _k: 0,
+        ),
+    )
+    object.__setattr__(runner, "_init_search_runner", lambda: calls.append("init"))
+    object.__setattr__(runner, "_serial_search", lambda: calls.append("serial") or (1, 1, 1, 1))
+    object.__setattr__(
+        runner,
+        "_conc_search",
+        lambda: calls.append("concurrent") or (1, [], [], [], [], []),
+    )
+
+    runner._run_perf_case(drop_old=False)
+
+    assert calls == ["init", "concurrent", "serial"]
+
+
+@pytest.mark.parametrize("stage", [TaskStage.SEARCH_SERIAL, TaskStage.SEARCH_CONCURRENT])
+def test_lifecycle_search_requires_both_phases(stage: TaskStage) -> None:
+    runner = object.__new__(CaseRunner)
+    object.__setattr__(runner, "db", SimpleNamespace(lifecycle_search_boundaries_enabled=True))
+    object.__setattr__(
+        runner,
+        "config",
+        SimpleNamespace(stages={stage}, case_config=SimpleNamespace(k=10)),
+    )
+    object.__setattr__(
+        runner,
+        "ca",
+        SimpleNamespace(
+            payload_profile=SimpleNamespace(value="ids_only"),
+            estimated_payload_bytes_per_query=lambda _k: 0,
+        ),
+    )
+    object.__setattr__(runner, "_init_search_runner", lambda: None)
+
+    with pytest.raises(RuntimeError, match="serial and concurrent"):
+        runner._run_perf_case(drop_old=False)
+
+
 def test_read_write_runner_preserves_explicit_database_duration() -> None:
     @contextmanager
     def init():

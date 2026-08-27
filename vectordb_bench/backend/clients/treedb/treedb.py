@@ -31,7 +31,8 @@ _QUERY_EMBEDDING_ENCODINGS = ("json", "f32_le_b64", "f32_le")
 _DOCUMENT_EMBEDDING_ENCODINGS = ("json", "f32_le_b64")
 _LIFECYCLE_SIDECAR_ENV = "TREEDB_LIFECYCLE_SIDECAR"
 _LIFECYCLE_BOUNDARY_ACK_ENV = "TREEDB_LIFECYCLE_BOUNDARY_ACK"
-_LIFECYCLE_BOUNDARIES = ("load_end", "optimize_start", "optimize_end")
+_OPTIMIZE_LIFECYCLE_BOUNDARIES = ("load_end", "optimize_start", "optimize_end")
+_SEARCH_LIFECYCLE_BOUNDARIES = ("cache_prime", "cache_warm")
 _LIFECYCLE_BOUNDARY_ACK_TIMEOUT = 30.0
 
 
@@ -130,7 +131,7 @@ class TreeDB(VectorDB):
         self._clients = threading.local()
         self._lifecycle_sidecar = os.environ.get(_LIFECYCLE_SIDECAR_ENV)
         self.optimize_timeout_allowance = (
-            len(_LIFECYCLE_BOUNDARIES) * _LIFECYCLE_BOUNDARY_ACK_TIMEOUT
+            len(_OPTIMIZE_LIFECYCLE_BOUNDARIES) * _LIFECYCLE_BOUNDARY_ACK_TIMEOUT
             if os.environ.get(_LIFECYCLE_BOUNDARY_ACK_ENV)
             else 0.0
         )
@@ -281,22 +282,31 @@ class TreeDB(VectorDB):
         return response.upserted, None
 
     def optimize(self, data_size: int | None = None):
-        acknowledgement = os.environ.get(_LIFECYCLE_BOUNDARY_ACK_ENV)
-
-        def emit_boundary(event: str, **values: Any) -> None:
-            timestamp_ns = self._emit_lifecycle(event, **values)
-            if acknowledgement:
-                if timestamp_ns is None:
-                    raise RuntimeError("TreeDB lifecycle diagnostics acknowledgement requires the lifecycle sidecar")
-                _wait_for_boundary_ack(acknowledgement, event, timestamp_ns)
-
-        emit_boundary("load_end")
-        emit_boundary("optimize_start")
+        self._emit_lifecycle_boundary("load_end")
+        self._emit_lifecycle_boundary("optimize_start")
         started = time.perf_counter()
         response = self.client.optimize_index(self.index_name)
         duration = time.perf_counter() - started
-        emit_boundary("optimize_end", response=_jsonable_response(response))
+        self._emit_lifecycle_boundary("optimize_end", response=_jsonable_response(response))
         return OptimizeResult(duration_seconds=duration)
+
+    @property
+    def lifecycle_search_boundaries_enabled(self) -> bool:
+        return bool(self._lifecycle_sidecar)
+
+    def complete_lifecycle_search_phase(self, event: str) -> None:
+        if event not in _SEARCH_LIFECYCLE_BOUNDARIES:
+            msg = f"unsupported TreeDB lifecycle search boundary {event!r}"
+            raise ValueError(msg)
+        self._emit_lifecycle_boundary(event)
+
+    def _emit_lifecycle_boundary(self, event: str, **values: Any) -> None:
+        timestamp_ns = self._emit_lifecycle(event, **values)
+        acknowledgement = os.environ.get(_LIFECYCLE_BOUNDARY_ACK_ENV)
+        if acknowledgement:
+            if timestamp_ns is None:
+                raise RuntimeError("TreeDB lifecycle diagnostics acknowledgement requires the lifecycle sidecar")
+            _wait_for_boundary_ack(acknowledgement, event, timestamp_ns)
 
     @property
     def requires_live_ann_preflight(self) -> bool:

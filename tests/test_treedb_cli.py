@@ -628,6 +628,62 @@ def test_treedb_lifecycle_waits_for_exact_diagnostics_at_each_optimize_boundary(
     assert db.optimize_timeout_allowance == 90.0
 
 
+def test_treedb_lifecycle_waits_at_real_search_boundaries(monkeypatch: MonkeyPatch, tmp_path) -> None:
+    sidecar = tmp_path / "lifecycle.jsonl"
+    acknowledgement = tmp_path / "lifecycle-boundary-diagnostics.json"
+    monkeypatch.setenv("TREEDB_LIFECYCLE_SIDECAR", str(sidecar))
+    monkeypatch.setenv("TREEDB_LIFECYCLE_BOUNDARY_ACK", str(acknowledgement))
+
+    fake_module = ModuleType("treedb_client")
+    fake_module.Document = object
+    fake_module.TreeDBClient = type(
+        "FakeClient",
+        (),
+        {
+            "__init__": lambda self, *args, **kwargs: None,
+            "create_index": lambda self, *args, **kwargs: None,
+            "close": lambda self: None,
+        },
+    )
+    monkeypatch.setitem(sys.modules, "treedb_client", fake_module)
+
+    from vectordb_bench.backend.clients.treedb.treedb import TreeDB
+
+    db = TreeDB(
+        dim=2,
+        db_config={"base_url": "http://127.0.0.1:7120", "index_name": "bench"},
+        db_case_config=TreeDBColumnGraphExactConfig(),
+    )
+
+    for boundary in ("cache_prime", "cache_warm"):
+        worker = threading.Thread(target=db.complete_lifecycle_search_phase, args=(boundary,))
+        worker.start()
+        deadline = time.monotonic() + 2
+        record = None
+        while time.monotonic() < deadline:
+            if not sidecar.exists():
+                time.sleep(0.01)
+                continue
+            records = [json.loads(line) for line in sidecar.read_text().splitlines()]
+            record = next((item for item in records if item["event"] == boundary), None)
+            if record is not None:
+                break
+            time.sleep(0.01)
+        assert record is not None
+        assert worker.is_alive()
+        acknowledgement.write_text(
+            json.dumps(
+                {
+                    "boundary": boundary,
+                    "boundary_timestamp_ns": record["timestamp_ns"],
+                    "sample_timestamp_ns": record["timestamp_ns"] + 1,
+                }
+            )
+        )
+        worker.join(timeout=2)
+        assert not worker.is_alive()
+
+
 def test_treedb_lifecycle_ignores_stale_ack_until_current_run_replaces_it(tmp_path) -> None:
     from vectordb_bench.backend.clients.treedb.treedb import _wait_for_boundary_ack
 
