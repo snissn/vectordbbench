@@ -4,6 +4,7 @@ import pickle
 import sys
 import threading
 from contextlib import contextmanager
+from dataclasses import dataclass
 from types import ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
@@ -545,6 +546,23 @@ def test_treedb_lifecycle_sidecar_preserves_load_and_optimize_boundaries(monkeyp
     assert sum(record.get("server_accepted", 0) for record in records) == 3
     assert records[-1]["response"]["maintenance"]["root_id"] == 9
     assert all(isinstance(record["timestamp_ns"], int) for record in records)
+
+
+def test_treedb_lifecycle_sidecar_serializes_nested_client_dataclasses(monkeypatch: MonkeyPatch, tmp_path) -> None:
+    from vectordb_bench.backend.clients.treedb.treedb import _append_lifecycle_record, _jsonable_response
+
+    @dataclass
+    class Status:
+        root_id: int
+
+    @dataclass
+    class Response:
+        status: Status
+
+    path = tmp_path / "lifecycle.jsonl"
+    _append_lifecycle_record(str(path), "optimize_end", response=_jsonable_response(Response(Status(9))))
+
+    assert json.loads(path.read_text())["response"] == {"status": {"root_id": 9}}
 
 
 def test_treedb_compact_document_insert_sends_exact_f32le_bytes(monkeypatch: MonkeyPatch) -> None:

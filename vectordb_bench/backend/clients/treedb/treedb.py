@@ -6,6 +6,8 @@ import os
 import threading
 import time
 from contextlib import contextmanager
+from dataclasses import asdict, is_dataclass
+from enum import Enum
 from typing import Any
 
 import numpy as np
@@ -30,12 +32,20 @@ _LIFECYCLE_SIDECAR_ENV = "TREEDB_LIFECYCLE_SIDECAR"
 
 
 def _jsonable_response(response: Any) -> Any:
+    if is_dataclass(response):
+        return _jsonable_response(asdict(response))
+    if isinstance(response, Enum):
+        return response.value
+    if isinstance(response, dict):
+        return {key: _jsonable_response(value) for key, value in response.items()}
+    if isinstance(response, (list, tuple)):
+        return [_jsonable_response(value) for value in response]
     if callable(getattr(response, "model_dump", None)):
-        return response.model_dump(mode="json")
+        return _jsonable_response(response.model_dump(mode="json"))
     if callable(getattr(response, "dict", None)):
-        return response.dict()
+        return _jsonable_response(response.dict())
     if hasattr(response, "__dict__"):
-        return vars(response)
+        return _jsonable_response(vars(response))
     return response
 
 
