@@ -75,9 +75,10 @@ def _wait_for_load_end_ack(path: str, load_end_ns: int) -> None:
             continue
         if not isinstance(acknowledgement, dict):
             raise ValueError("TreeDB lifecycle load-end diagnostics acknowledgement must be an object")
-        sample_ns = acknowledgement.get("sample_timestamp_ns")
         if acknowledgement.get("load_end_timestamp_ns") != load_end_ns:
-            raise RuntimeError("TreeDB lifecycle load-end diagnostics acknowledgement is stale")
+            time.sleep(0.01)
+            continue
+        sample_ns = acknowledgement.get("sample_timestamp_ns")
         if not isinstance(sample_ns, int) or isinstance(sample_ns, bool) or sample_ns < load_end_ns:
             raise RuntimeError("TreeDB lifecycle load-end diagnostics acknowledgement has an invalid sample timestamp")
         return

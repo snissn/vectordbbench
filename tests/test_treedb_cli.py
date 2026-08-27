@@ -608,6 +608,43 @@ def test_treedb_lifecycle_waits_for_load_end_diagnostics_before_optimize(monkeyp
     assert optimize_started.is_set()
 
 
+def test_treedb_lifecycle_ignores_stale_ack_until_current_run_replaces_it(tmp_path) -> None:
+    from vectordb_bench.backend.clients.treedb.treedb import _wait_for_load_end_ack
+
+    acknowledgement = tmp_path / "load-end-diagnostics.json"
+    acknowledgement.write_text(
+        json.dumps(
+            {
+                "load_end_timestamp_ns": 10,
+                "sample_timestamp_ns": 11,
+            }
+        )
+    )
+    completed = threading.Event()
+
+    def wait() -> None:
+        _wait_for_load_end_ack(str(acknowledgement), 20)
+        completed.set()
+
+    worker = threading.Thread(target=wait)
+    worker.start()
+    time.sleep(0.03)
+    assert not completed.is_set()
+
+    acknowledgement.write_text(
+        json.dumps(
+            {
+                "load_end_timestamp_ns": 20,
+                "sample_timestamp_ns": 21,
+            }
+        )
+    )
+    worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert completed.is_set()
+
+
 def test_treedb_lifecycle_failure_after_acceptance_is_not_retried(monkeypatch: MonkeyPatch, tmp_path) -> None:
     monkeypatch.setenv("TREEDB_LIFECYCLE_SIDECAR", str(tmp_path / "lifecycle.jsonl"))
     calls = []
