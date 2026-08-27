@@ -511,10 +511,22 @@ def test_treedb_lifecycle_sidecar_preserves_load_and_optimize_boundaries(monkeyp
         db_case_config=TreeDBColumnGraphExactConfig(),
         drop_old=True,
     )
-    worker_a = pickle.loads(pickle.dumps(db))  # noqa: S301
-    worker_b = pickle.loads(pickle.dumps(db))  # noqa: S301
-    assert worker_a.insert_embeddings([[1.0, 0.0], [0.0, 1.0]], [7, 8]) == (2, None)
-    assert worker_b.insert_embeddings([[0.5, 0.5]], [9]) == (1, None)
+    start = threading.Barrier(2)
+    results = []
+
+    def insert(embeddings, metadata):
+        start.wait(timeout=2)
+        results.append(db.insert_embeddings(embeddings, metadata))
+
+    workers = [
+        threading.Thread(target=insert, args=([[1.0, 0.0], [0.0, 1.0]], [7, 8])),
+        threading.Thread(target=insert, args=([[0.5, 0.5]], [9])),
+    ]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=2)
+    assert sorted(results) == [(1, None), (2, None)]
 
     restored = pickle.loads(pickle.dumps(db))  # noqa: S301
     restored.optimize()

@@ -139,14 +139,7 @@ class TreeDB(VectorDB):
             return
         with self._lifecycle_lock:
             if not self._lifecycle_load_started:
-                claim = f"{self._lifecycle_sidecar}.load-start.claim"
-                try:
-                    fd = os.open(claim, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-                except FileExistsError:
-                    pass
-                else:
-                    os.close(fd)
-                    self._emit_lifecycle("load_start")
+                self._emit_lifecycle("load_start")
                 self._lifecycle_load_started = True
 
     def _new_client(self, timeout: float | None = None):
