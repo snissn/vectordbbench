@@ -578,6 +578,25 @@ class TreeDB(VectorDB):
             raise ValueError("TreeDB partition_bridge_v1 requires a lowercase hex node SHA")
         if self._metric != "cosine":
             raise ValueError("TreeDB partition_bridge_v1 requires cosine")
+        canonical = {
+            "document_embedding_encoding": "json",
+            "query_embedding_encoding": "json",
+            "stats_mode": "full_diagnostics",
+            "response_format": "full",
+        }
+        if any(getattr(self, name) != value for name, value in canonical.items()):
+            raise ValueError("TreeDB partition_bridge_v1 rejects document-service encoding and response options")
+        search = self._search_param
+        if (
+            search.get("use_vector_index") is not False
+            or search.get("query_mode") != "exact"
+            or search.get("quantized_index_name")
+            or search.get("quantized_rerank_candidates") != 0
+            or search.get("experimental") is not False
+            or search.get("require_vector_index_guards") is not True
+            or getattr(self.db_case_config, "strategy", None) != "column_graph"
+        ):
+            raise ValueError("TreeDB partition_bridge_v1 rejects noncanonical document-service search options")
         self._partition_url()
         if (
             isinstance(self.timeout, bool)
@@ -643,7 +662,7 @@ class TreeDB(VectorDB):
             raise RuntimeError("TreeDB partition bridge returned invalid JSON")
         return value
 
-    def _partition_request(self, path: str, payload: dict | None = None, *, retry: bool = False) -> dict:
+    def _partition_request(self, path: str, payload: dict | None = None) -> dict:
         clients = self._thread_clients()
         connection = getattr(clients, "partition_connection", None)
         temporary = connection is None
@@ -651,16 +670,10 @@ class TreeDB(VectorDB):
             connection = self._new_partition_connection()
         try:
             return self._partition_response(connection, path, payload)
-        except (OSError, http.client.HTTPException):
+        except (OSError, http.client.HTTPException, RuntimeError):
             connection.close()
-            if retry and not temporary:
+            if not temporary:
                 clients.partition_connection = self._new_partition_connection()
-                try:
-                    return self._partition_response(clients.partition_connection, path, payload)
-                except (OSError, http.client.HTTPException):
-                    clients.partition_connection.close()
-                    del clients.partition_connection
-                    raise
             raise
         finally:
             if temporary:
@@ -725,7 +738,6 @@ class TreeDB(VectorDB):
                 "probes": probes,
                 "ef_search": ef_search,
             },
-            retry=True,
         )
         self._partition_identity(response)
         ids, scores, counters = response.get("ids"), response.get("scores"), response.get("counters")

@@ -1,6 +1,7 @@
 import http.client
 import threading
 from email.message import Message
+from types import SimpleNamespace
 
 import pytest
 
@@ -13,7 +14,19 @@ def bridge() -> TreeDB:
     db.index_name, db.partition_generation = "idx", 7
     db.partition_node_config_sha256 = "a" * 64
     db.partition_count = 3
-    db._search_param = {"partition_probes": 2, "ef_search": 64}
+    db.document_embedding_encoding = db.query_embedding_encoding = "json"
+    db.stats_mode, db.response_format = "full_diagnostics", "full"
+    db.db_case_config = SimpleNamespace(strategy="column_graph")
+    db._search_param = {
+        "partition_probes": 2,
+        "ef_search": 64,
+        "use_vector_index": False,
+        "query_mode": "exact",
+        "quantized_index_name": "",
+        "quantized_rerank_candidates": 0,
+        "experimental": False,
+        "require_vector_index_guards": True,
+    }
     return db
 
 
@@ -156,6 +169,36 @@ def test_partition_config_rejects_probe_count_at_or_above_count() -> None:
         db._validate_partition_config_shape()
 
 
+@pytest.mark.parametrize(
+    ("db_config", "case_config"),
+    [
+        ({"query_embedding_encoding": "f32_le"}, {}),
+        ({"document_embedding_encoding": "f32_le_b64"}, {}),
+        ({"stats_mode": "production"}, {}),
+        ({"response_format": "ids"}, {}),
+        ({}, {"use_vector_index": True}),
+        ({}, {"query_mode": "quantized_only"}),
+        ({}, {"quantized_index_name": "quantized"}),
+        ({}, {"quantized_rerank_candidates": 1}),
+        ({}, {"experimental": True}),
+        ({}, {"require_vector_index_guards": False}),
+        ({}, {"strategy": "native_runtime"}),
+    ],
+)
+def test_partition_constructor_rejects_noncanonical_document_knobs(monkeypatch, db_config, case_config) -> None:
+    monkeypatch.setattr(TreeDB, "_partition_preflight", lambda *_: pytest.fail("must not preflight"))
+    config = {
+        "base_url": "http://127.0.0.1:7120",
+        "transport": "partition_bridge_v1",
+        "partition_generation": 7,
+        "partition_node_config_sha256": "a" * 64,
+        "partition_count": 3,
+        **db_config,
+    }
+    with pytest.raises(ValueError, match="rejects"):
+        TreeDB(dim=1, db_config=config, db_case_config=TreeDBHNSWConfig(partition_probes=2, **case_config))
+
+
 def test_partition_search_reuses_one_worker_connection(monkeypatch) -> None:
     db = bridge()
     db._clients = threading.local()
@@ -168,7 +211,7 @@ def test_partition_search_reuses_one_worker_connection(monkeypatch) -> None:
     assert calls == [(connection, "/v1/search"), (connection, "/v1/search")]
 
 
-def test_partition_retry_replaces_and_closes_worker_connection(monkeypatch) -> None:
+def test_partition_failed_row_replaces_connection_without_resubmitting(monkeypatch) -> None:
     db = bridge()
     db.transport, db._clients = "partition_bridge_v1", threading.local()
     original = type("Connection", (), {"closed": False, "close": lambda self: setattr(self, "closed", True)})()
@@ -184,10 +227,36 @@ def test_partition_retry_replaces_and_closes_worker_connection(monkeypatch) -> N
 
     monkeypatch.setattr(db, "_partition_response", partition_response)
     with db.init():
+        with pytest.raises(http.client.RemoteDisconnected):
+            db._partition_search([1.0], 1)
         assert db._partition_search([1.0], 1) == [1]
     assert original.closed and replacement.closed
     assert not hasattr(db._clients, "partition_connection")
     assert [path for _, path in calls] == ["/v1/search", "/v1/search"]
+    assert calls[0][0] is original and calls[1][0] is replacement
+
+
+def test_partition_oversized_response_discards_worker_connection(monkeypatch) -> None:
+    db = bridge()
+    db._clients = threading.local()
+    original = type("Connection", (), {"closed": False, "close": lambda self: setattr(self, "closed", True)})()
+    replacement = type("Connection", (), {"closed": False, "close": lambda self: setattr(self, "closed", True)})()
+    db._clients.partition_connection = original
+    monkeypatch.setattr(db, "_new_partition_connection", lambda: replacement)
+    calls = []
+
+    def partition_response(connection, path, payload):
+        calls.append(connection)
+        if connection is original:
+            raise RuntimeError("TreeDB partition bridge response exceeds limit")
+        return response()
+
+    monkeypatch.setattr(db, "_partition_response", partition_response)
+    with pytest.raises(RuntimeError, match="exceeds limit"):
+        db._partition_request("/v1/search", {})
+    assert original.closed
+    assert db._partition_request("/v1/search", {}) == response()
+    assert calls == [original, replacement]
 
 
 @pytest.mark.parametrize("ids", [[1, 1], [1 << 64]])

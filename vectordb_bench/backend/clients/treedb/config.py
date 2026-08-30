@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel
 
 from ..api import DBCaseConfig, DBConfig, IndexType, MetricType
@@ -15,7 +17,7 @@ class TreeDBConfig(DBConfig):
     response_format: str = "full"
     live_ann_visibility_timeout: float = 5.0
     live_ann_visibility_poll_interval: float = 0.05
-    transport: str = "document_service"
+    transport: Literal["document_service", "partition_bridge_v1"] = "document_service"
     partition_generation: int = 0
     partition_node_config_sha256: str = ""
     partition_count: int = 0

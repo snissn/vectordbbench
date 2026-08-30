@@ -241,8 +241,8 @@ def test_treedb_config_to_dict_and_case_config_scalar_u8_rerank() -> None:
         "document_embedding_encoding": "f32_le_b64",
         "query_embedding_encoding": "f32_le_b64",
         "stats_mode": "full_diagnostics",
-            "response_format": "full",
-            "live_ann_visibility_timeout": 5.0,
+        "response_format": "full",
+        "live_ann_visibility_timeout": 5.0,
         "live_ann_visibility_poll_interval": 0.05,
     }
 
@@ -1765,6 +1765,11 @@ def test_partition_config_serializes_bridge_fields_only_for_partition_mode() -> 
     )
     assert config.to_dict()["transport"] == "partition_bridge_v1"
     assert config.to_dict()["partition_count"] == 3
+
+
+def test_treedb_config_rejects_unknown_transport() -> None:
+    with pytest.raises(ValueError, match="transport"):
+        TreeDBConfig(db_label="local", base_url="http://127.0.0.1:7120", transport="unknown")
 
 
 @pytest.mark.parametrize(
