@@ -241,13 +241,9 @@ def test_treedb_config_to_dict_and_case_config_scalar_u8_rerank() -> None:
         "document_embedding_encoding": "f32_le_b64",
         "query_embedding_encoding": "f32_le_b64",
         "stats_mode": "full_diagnostics",
-        "response_format": "full",
-        "live_ann_visibility_timeout": 5.0,
-            "live_ann_visibility_poll_interval": 0.05,
-            "transport": "document_service",
-            "partition_generation": 0,
-            "partition_node_config_sha256": "",
-            "partition_count": 0,
+            "response_format": "full",
+            "live_ann_visibility_timeout": 5.0,
+        "live_ann_visibility_poll_interval": 0.05,
     }
 
     case = TreeDBHNSWConfig(
@@ -1745,6 +1741,30 @@ def test_treedb_named_configs_have_expected_modes() -> None:
     scalar = TreeDBScalarU8RerankConfig()
     assert scalar.search_param()["query_mode"] == "quantized_rerank"
     assert scalar.search_param()["quantized_rerank_candidates"] == 32
+
+
+def test_partition_bridge_options_are_limited_to_general_hnsw_command() -> None:
+    runner = CliRunner()
+    general = runner.invoke(treedb_cli.TreeDBHNSW, ["--help"])
+    named = runner.invoke(treedb_cli.TreeDBColumnGraphExact, ["--help"])
+    assert general.exit_code == named.exit_code == 0
+    assert "--transport" in general.output
+    assert "--partition-count" in general.output
+    assert "--transport" not in named.output
+    assert "--partition-count" not in named.output
+
+
+def test_partition_config_serializes_bridge_fields_only_for_partition_mode() -> None:
+    config = TreeDBConfig(
+        db_label="local",
+        base_url="http://127.0.0.1:7120",
+        transport="partition_bridge_v1",
+        partition_generation=7,
+        partition_node_config_sha256="node",
+        partition_count=3,
+    )
+    assert config.to_dict()["transport"] == "partition_bridge_v1"
+    assert config.to_dict()["partition_count"] == 3
 
 
 @pytest.mark.parametrize(

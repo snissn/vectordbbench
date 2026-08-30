@@ -22,7 +22,7 @@ class TreeDBConfig(DBConfig):
     _extra_empty_skip = frozenset({"partition_node_config_sha256"})
 
     def to_dict(self) -> dict:
-        return {
+        result = {
             "base_url": self.base_url,
             "index_name": self.index_name,
             "timeout": self.timeout,
@@ -32,11 +32,15 @@ class TreeDBConfig(DBConfig):
             "response_format": self.response_format,
             "live_ann_visibility_timeout": self.live_ann_visibility_timeout,
             "live_ann_visibility_poll_interval": self.live_ann_visibility_poll_interval,
-            "transport": self.transport,
-            "partition_generation": self.partition_generation,
-            "partition_node_config_sha256": self.partition_node_config_sha256,
-            "partition_count": self.partition_count,
         }
+        if self.transport == "partition_bridge_v1":
+            result.update(
+                transport=self.transport,
+                partition_generation=self.partition_generation,
+                partition_node_config_sha256=self.partition_node_config_sha256,
+                partition_count=self.partition_count,
+            )
+        return result
 
 
 class TreeDBHNSWConfig(BaseModel, DBCaseConfig):
