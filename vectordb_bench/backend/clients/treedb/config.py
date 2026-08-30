@@ -15,6 +15,11 @@ class TreeDBConfig(DBConfig):
     response_format: str = "full"
     live_ann_visibility_timeout: float = 5.0
     live_ann_visibility_poll_interval: float = 0.05
+    transport: str = "document_service"
+    partition_generation: int = 0
+    partition_node_config_sha256: str = ""
+    partition_count: int = 0
+    _extra_empty_skip = frozenset({"partition_node_config_sha256"})
 
     def to_dict(self) -> dict:
         return {
@@ -27,6 +32,10 @@ class TreeDBConfig(DBConfig):
             "response_format": self.response_format,
             "live_ann_visibility_timeout": self.live_ann_visibility_timeout,
             "live_ann_visibility_poll_interval": self.live_ann_visibility_poll_interval,
+            "transport": self.transport,
+            "partition_generation": self.partition_generation,
+            "partition_node_config_sha256": self.partition_node_config_sha256,
+            "partition_count": self.partition_count,
         }
 
 
@@ -51,6 +60,7 @@ class TreeDBHNSWConfig(BaseModel, DBCaseConfig):
     quantized_rerank_candidates: int = 0
     require_vector_index_guards: bool = True
     experimental: bool = False
+    partition_probes: int = 0
 
     def index_param(self) -> dict:
         params: dict = {
@@ -78,6 +88,7 @@ class TreeDBHNSWConfig(BaseModel, DBCaseConfig):
             "quantized_rerank_candidates": self.quantized_rerank_candidates,
             "require_vector_index_guards": self.require_vector_index_guards,
             "experimental": self.experimental,
+            "partition_probes": self.partition_probes,
         }
 
 

@@ -5,6 +5,7 @@ import math
 import os
 import threading
 import time
+from urllib.request import Request, urlopen
 from contextlib import contextmanager
 from dataclasses import asdict, is_dataclass
 from enum import Enum
@@ -127,6 +128,10 @@ class TreeDB(VectorDB):
         self.response_format = db_config.get("response_format", "full")
         self.live_ann_visibility_timeout = db_config.get("live_ann_visibility_timeout", 5.0)
         self.live_ann_visibility_poll_interval = db_config.get("live_ann_visibility_poll_interval", 0.05)
+        self.transport = db_config.get("transport", "document_service")
+        self.partition_generation = db_config.get("partition_generation", 0)
+        self.partition_node_config_sha256 = db_config.get("partition_node_config_sha256", "")
+        self.partition_count = db_config.get("partition_count", 0)
         self._client = None
         self._clients = threading.local()
         self._lifecycle_sidecar = os.environ.get(_LIFECYCLE_SIDECAR_ENV)
@@ -146,6 +151,9 @@ class TreeDB(VectorDB):
             msg = f"TreeDB document_embedding_encoding={self.document_embedding_encoding!r} is not supported"
             raise ValueError(msg)
         self._validate_config_shape()
+        if self._transport() == "partition_bridge_v1":
+            self._partition_preflight()
+            return
 
         # Do setup in __init__ with a short-lived client so the object remains
         # pickle-safe for VectorDBBench subprocess runners.
@@ -238,6 +246,8 @@ class TreeDB(VectorDB):
         tenant_labels_data: list[str] | None = None,
         **kwargs: Any,
     ) -> tuple[int, Exception | None]:
+        if self._transport() == "partition_bridge_v1":
+            raise RuntimeError("TreeDB partition_bridge_v1 is search-only and rejects insert")
         try:
             self._emit_load_start()
             if self.document_embedding_encoding == "f32_le_b64":
@@ -282,6 +292,8 @@ class TreeDB(VectorDB):
         return response.upserted, None
 
     def optimize(self, data_size: int | None = None):
+        if self._transport() == "partition_bridge_v1":
+            raise RuntimeError("TreeDB partition_bridge_v1 is search-only and rejects optimize")
         self._emit_lifecycle_boundary("load_end")
         self._emit_lifecycle_boundary("optimize_start")
         started = time.perf_counter()
@@ -310,7 +322,7 @@ class TreeDB(VectorDB):
 
     @property
     def requires_live_ann_preflight(self) -> bool:
-        return bool(self._search_param.get("use_vector_index"))
+        return self._transport() != "partition_bridge_v1" and bool(self._search_param.get("use_vector_index"))
 
     def preflight_live_ann(self) -> None:
         """Prove one insert, update, and delete reaches the selected ANN route.
@@ -406,6 +418,8 @@ class TreeDB(VectorDB):
             raise RuntimeError("TreeDB live-ANN preflight performed a full rebuild")
 
     def search_embedding(self, query: list[float], k: int = 100, **kwargs: Any) -> list[int]:
+        if self._transport() == "partition_bridge_v1":
+            return self._partition_search(query, k)
         if self._search_param.get("use_vector_index"):
             result = self._search_vector_index(query, k)
             if self._search_param.get("require_vector_index_guards", True):
@@ -460,6 +474,15 @@ class TreeDB(VectorDB):
         raise ValueError(msg)
 
     def _validate_config_shape(self) -> None:
+        if self._transport() == "partition_bridge_v1":
+            probes = int(self._search_param.get("partition_probes") or 0)
+            if self.partition_generation <= 0 or not self.partition_node_config_sha256 or self.partition_count <= 1 or not 0 < probes < self.partition_count:
+                raise ValueError("TreeDB partition_bridge_v1 requires generation, node SHA, partition_count, and 0 < probes < partition_count")
+            if self._metric != "cosine":
+                raise ValueError("TreeDB partition_bridge_v1 requires cosine")
+            return
+        if self._transport() != "document_service":
+            raise ValueError(f"unsupported TreeDB transport {self._transport()!r}")
         self._validate_live_ann_timing()
         if self.query_embedding_encoding not in _QUERY_EMBEDDING_ENCODINGS:
             msg = f"TreeDB query_embedding_encoding={self.query_embedding_encoding!r} is not supported"
@@ -518,6 +541,47 @@ class TreeDB(VectorDB):
             return
         msg = f"TreeDB vector-index benchmark route does not support query_mode={mode!r}"
         raise ValueError(msg)
+
+    def _transport(self) -> str:
+        return getattr(self, "transport", "document_service")
+
+    def _partition_request(self, path: str, payload: dict | None = None) -> dict:
+        data = None if payload is None else json.dumps(payload, separators=(",", ":")).encode()
+        request = Request(self.base_url.rstrip("/") + path, data=data, method="GET" if data is None else "POST")
+        if data is not None:
+            request.add_header("Content-Type", "application/json")
+        with urlopen(request, timeout=self.timeout) as response:  # nosec B310 -- explicit user-selected local bridge
+            if response.headers.get_content_type() != "application/json":
+                raise RuntimeError("TreeDB partition bridge returned non-JSON")
+            value = json.load(response)
+        if not isinstance(value, dict):
+            raise RuntimeError("TreeDB partition bridge returned invalid JSON")
+        return value
+
+    def _partition_identity(self, response: dict) -> None:
+        if response.get("version") != 1 or response.get("route") != "/v1/vector-partition/public" or response.get("node_config_sha256") != self.partition_node_config_sha256 or response.get("index") != self.index_name or response.get("generation") != self.partition_generation:
+            raise RuntimeError("TreeDB partition bridge identity mismatch")
+
+    def _partition_preflight(self) -> None:
+        response = self._partition_request("/v1/status")
+        self._partition_identity(response)
+        if response.get("ready") is not True or response.get("state") != "active":
+            raise RuntimeError("TreeDB partition bridge is not ready and active")
+        self._emit_lifecycle("partition_preflight", response=response)
+
+    def _partition_search(self, query: list[float], k: int) -> list[int]:
+        probes = int(self._search_param["partition_probes"])
+        response = self._partition_request("/v1/search", {"version": 1, "index": self.index_name, "generation": self.partition_generation, "query": [float(v) for v in query], "top_k": k, "probes": probes, "ef_search": self._search_param["ef_search"]})
+        self._partition_identity(response)
+        ids, scores, counters = response.get("ids"), response.get("scores"), response.get("counters")
+        if not isinstance(ids, list) or not isinstance(scores, list) or len(ids) != k or len(scores) != k or not isinstance(counters, dict):
+            raise RuntimeError("TreeDB partition bridge returned partial top-k")
+        selected, hnsw, exact = (counters.get(name) for name in ("selected_partitions", "hnsw_served_partitions", "exact_scan_partitions"))
+        if not all(isinstance(v, int) and not isinstance(v, bool) for v in (selected, hnsw, exact)) or selected != probes or hnsw != selected or exact != 0 or hnsw + exact != selected:
+            raise RuntimeError("TreeDB partition bridge route proof failed")
+        if any(not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in ids):
+            raise RuntimeError("TreeDB partition bridge returned invalid compact IDs")
+        return ids
 
     def _validate_live_ann_timing(self) -> None:
         timeout = getattr(self, "live_ann_visibility_timeout", 5.0)

@@ -243,7 +243,11 @@ def test_treedb_config_to_dict_and_case_config_scalar_u8_rerank() -> None:
         "stats_mode": "full_diagnostics",
         "response_format": "full",
         "live_ann_visibility_timeout": 5.0,
-        "live_ann_visibility_poll_interval": 0.05,
+            "live_ann_visibility_poll_interval": 0.05,
+            "transport": "document_service",
+            "partition_generation": 0,
+            "partition_node_config_sha256": "",
+            "partition_count": 0,
     }
 
     case = TreeDBHNSWConfig(
