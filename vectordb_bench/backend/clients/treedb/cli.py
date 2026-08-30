@@ -1,4 +1,4 @@
-from typing import Annotated, Unpack
+from typing import Annotated, Any, Unpack
 
 import click
 
@@ -114,7 +114,15 @@ class TreeDBBaseTypedDict(CommonTypedDict):
 
 
 class TreeDBTypedDict(TreeDBBaseTypedDict):
-    transport: Annotated[str, click.option("--transport", type=click.Choice(["document_service", "partition_bridge_v1"]), default="document_service", show_default=True)]
+    transport: Annotated[
+        str,
+        click.option(
+            "--transport",
+            type=click.Choice(["document_service", "partition_bridge_v1"]),
+            default="document_service",
+            show_default=True,
+        ),
+    ]
     partition_generation: Annotated[int, click.option("--partition-generation", type=int, default=0)]
     partition_node_config_sha256: Annotated[str, click.option("--partition-node-config-sha256", type=str, default="")]
     partition_count: Annotated[int, click.option("--partition-count", type=int, default=0)]
@@ -230,7 +238,7 @@ class TreeDBScalarU8RerankHNSWTypedDict(TreeDBScalarU8RerankTypedDict, HNSWFlavo
 class TreeDBRaBitQ1BitExperimentalHNSWTypedDict(TreeDBRaBitQ1BitExperimentalTypedDict, HNSWFlavor3): ...
 
 
-def _treedb_config(parameters):
+def _treedb_config(parameters: dict[str, Any]):
     from .config import TreeDBConfig
 
     return TreeDBConfig(
@@ -251,7 +259,7 @@ def _treedb_config(parameters):
     )
 
 
-def _run_treedb(parameters, db_case_config):
+def _run_treedb(parameters: dict[str, Any], db_case_config: Any):
     run(DB.TreeDB, _treedb_config(parameters), db_case_config, **parameters)
 
 

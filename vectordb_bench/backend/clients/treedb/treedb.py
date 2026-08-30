@@ -1,9 +1,11 @@
 import base64
 import http.client
+import ipaddress
 import json
 import logging
 import math
 import os
+import re
 import threading
 import time
 from contextlib import contextmanager
@@ -37,6 +39,9 @@ _OPTIMIZE_LIFECYCLE_BOUNDARIES = ("load_end", "optimize_start", "optimize_end")
 _SEARCH_LIFECYCLE_BOUNDARIES = ("cache_prime", "cache_warm")
 _LIFECYCLE_BOUNDARY_ACK_TIMEOUT = 30.0
 _PARTITION_MAX_RESPONSE_BYTES = 1024 * 1024
+_PARTITION_MAX_REQUEST_BYTES = 1024 * 1024
+_PARTITION_NODE_CONFIG_SHA256 = re.compile(r"[0-9a-f]{64}")
+_UINT64_MAX = (1 << 64) - 1
 
 
 def _jsonable_response(response: Any) -> Any:
@@ -152,12 +157,13 @@ class TreeDB(VectorDB):
         if self.document_embedding_encoding not in _DOCUMENT_EMBEDDING_ENCODINGS:
             msg = f"TreeDB document_embedding_encoding={self.document_embedding_encoding!r} is not supported"
             raise ValueError(msg)
-        self._validate_config_shape()
         if self._transport() == "partition_bridge_v1":
+            self._validate_partition_config_shape()
             if drop_old:
                 raise ValueError("TreeDB partition_bridge_v1 is search-only and rejects drop_old")
             self._partition_preflight()
             return
+        self._validate_config_shape()
 
         # Do setup in __init__ with a short-lived client so the object remains
         # pickle-safe for VectorDBBench subprocess runners.
@@ -228,9 +234,10 @@ class TreeDB(VectorDB):
             try:
                 yield
             finally:
-                if getattr(clients, "partition_connection", None) is connection:
+                owned = getattr(clients, "partition_connection", None)
+                if owned is not None:
                     del clients.partition_connection
-                connection.close()
+                    owned.close()
             return
         client = self._new_client()
         clients = self._thread_clients()
@@ -489,28 +496,6 @@ class TreeDB(VectorDB):
         raise ValueError(msg)
 
     def _validate_config_shape(self) -> None:
-        if self._transport() == "partition_bridge_v1":
-            probes = self._search_param.get("partition_probes")
-            integers = (self.partition_generation, self.partition_count, probes)
-            if (
-                any(isinstance(value, bool) or not isinstance(value, int) for value in integers)
-                or self.partition_generation <= 0
-                or not self.partition_node_config_sha256
-                or self.partition_count <= 1
-                or not 0 < probes < self.partition_count
-            ):
-                raise ValueError("TreeDB partition_bridge_v1 requires generation, node SHA, partition_count, and 0 < probes < partition_count")
-            if self._metric != "cosine":
-                raise ValueError("TreeDB partition_bridge_v1 requires cosine")
-            self._partition_url()
-            if (
-                isinstance(self.timeout, bool)
-                or not isinstance(self.timeout, (int, float))
-                or not math.isfinite(self.timeout)
-                or not 0 < self.timeout <= 60
-            ):
-                raise ValueError("TreeDB partition_bridge_v1 timeout must be > 0 and <= 60")
-            return
         if self._transport() != "document_service":
             raise ValueError(f"unsupported TreeDB transport {self._transport()!r}")
         self._validate_live_ann_timing()
@@ -575,15 +560,46 @@ class TreeDB(VectorDB):
     def _transport(self) -> str:
         return getattr(self, "transport", "document_service")
 
+    def _validate_partition_config_shape(self) -> None:
+        probes = self._search_param.get("partition_probes")
+        integers = (self.partition_generation, self.partition_count, probes)
+        if (
+            any(isinstance(value, bool) or not isinstance(value, int) for value in integers)
+            or self.partition_generation <= 0
+            or self.partition_count <= 1
+            or not 0 < probes < self.partition_count
+        ):
+            msg = (
+                "TreeDB partition_bridge_v1 requires generation, node SHA, "
+                "partition_count, and 0 < probes < partition_count"
+            )
+            raise ValueError(msg)
+        if not _PARTITION_NODE_CONFIG_SHA256.fullmatch(self.partition_node_config_sha256):
+            raise ValueError("TreeDB partition_bridge_v1 requires a lowercase hex node SHA")
+        if self._metric != "cosine":
+            raise ValueError("TreeDB partition_bridge_v1 requires cosine")
+        self._partition_url()
+        if (
+            isinstance(self.timeout, bool)
+            or not isinstance(self.timeout, (int, float))
+            or not math.isfinite(self.timeout)
+            or not 0 < self.timeout <= 60
+        ):
+            raise ValueError("TreeDB partition_bridge_v1 timeout must be > 0 and <= 60")
+
     def _partition_url(self):
         parsed = urlsplit(self.base_url)
         try:
             port = parsed.port
         except ValueError as exc:
             raise ValueError("TreeDB partition_bridge_v1 requires a valid numeric-loopback port") from exc
+        try:
+            is_loopback = ipaddress.ip_address(parsed.hostname or "").is_loopback
+        except ValueError as exc:
+            raise ValueError("TreeDB partition_bridge_v1 requires a numeric-loopback host") from exc
         if (
             parsed.scheme != "http"
-            or parsed.hostname not in ("127.0.0.1", "::1")
+            or not is_loopback
             or parsed.path not in ("", "/")
             or parsed.query
             or parsed.fragment
@@ -591,15 +607,18 @@ class TreeDB(VectorDB):
             or parsed.password
             or port is None
         ):
-            raise ValueError("TreeDB partition_bridge_v1 requires a numeric-loopback http base URL with port and no path")
+            msg = "TreeDB partition_bridge_v1 requires a numeric-loopback HTTP base URL with port and no path"
+            raise ValueError(msg)
         return parsed
 
     def _new_partition_connection(self):
         parsed = self._partition_url()
         return http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=self.timeout)
 
-    def _partition_response(self, connection, path: str, payload: dict | None) -> dict:
+    def _partition_response(self, connection: Any, path: str, payload: dict | None) -> dict:
         data = None if payload is None else json.dumps(payload, separators=(",", ":")).encode()
+        if data is not None and len(data) > _PARTITION_MAX_REQUEST_BYTES:
+            raise ValueError("TreeDB partition bridge request exceeds limit")
         connection.request(
             "GET" if data is None else "POST",
             path,
@@ -607,15 +626,14 @@ class TreeDB(VectorDB):
             headers={"Content-Type": "application/json"} if data else {},
         )
         response = connection.getresponse()
-        if not 200 <= response.status < 300:
-            response.read()
-            raise RuntimeError(f"TreeDB partition bridge returned HTTP {response.status}")
-        if response.headers.get_content_type() != "application/json":
-            response.read()
-            raise RuntimeError("TreeDB partition bridge returned non-JSON")
         raw = response.read(_PARTITION_MAX_RESPONSE_BYTES + 1)
         if len(raw) > _PARTITION_MAX_RESPONSE_BYTES:
             raise RuntimeError("TreeDB partition bridge response exceeds limit")
+        if not 200 <= response.status < 300:
+            msg = f"TreeDB partition bridge returned HTTP {response.status}"
+            raise RuntimeError(msg)
+        if response.headers.get_content_type() != "application/json":
+            raise RuntimeError("TreeDB partition bridge returned non-JSON")
         try:
             text = raw.decode("utf-8").strip()
             value, end = json.JSONDecoder().raw_decode(text)
@@ -649,7 +667,15 @@ class TreeDB(VectorDB):
                 connection.close()
 
     def _partition_identity(self, response: dict) -> None:
-        if type(response.get("version")) is not int or type(response.get("generation")) is not int or response.get("version") != 1 or response.get("route") != "treedb.nativewire.vector_search_v1" or response.get("node_config_sha256") != self.partition_node_config_sha256 or response.get("index") != self.index_name or response.get("generation") != self.partition_generation:
+        if (
+            type(response.get("version")) is not int
+            or type(response.get("generation")) is not int
+            or response.get("version") != 1
+            or response.get("route") != "treedb.nativewire.vector_search_v1"
+            or response.get("node_config_sha256") != self.partition_node_config_sha256
+            or response.get("index") != self.index_name
+            or response.get("generation") != self.partition_generation
+        ):
             raise RuntimeError("TreeDB partition bridge identity mismatch")
 
     def _partition_preflight(self) -> None:
@@ -680,7 +706,10 @@ class TreeDB(VectorDB):
             or ef_search <= 0
         ):
             raise ValueError("TreeDB partition bridge requires positive integer top_k and ef_search")
-        if not query or any(isinstance(value, bool) or not isinstance(value, (int, float, np.integer, np.floating)) for value in query):
+        if not query or any(
+            isinstance(value, bool) or not isinstance(value, (int, float, np.integer, np.floating))
+            for value in query
+        ):
             raise ValueError("TreeDB partition bridge query must be nonempty finite floats")
         values = [float(value) for value in query]
         if not all(math.isfinite(value) for value in values):
@@ -700,12 +729,30 @@ class TreeDB(VectorDB):
         )
         self._partition_identity(response)
         ids, scores, counters = response.get("ids"), response.get("scores"), response.get("counters")
-        if not isinstance(ids, list) or not isinstance(scores, list) or len(ids) != k or len(scores) != k or not isinstance(counters, dict):
+        if (
+            not isinstance(ids, list)
+            or not isinstance(scores, list)
+            or len(ids) != k
+            or len(scores) != k
+            or not isinstance(counters, dict)
+        ):
             raise RuntimeError("TreeDB partition bridge returned partial top-k")
-        selected, hnsw, exact = (counters.get(name) for name in ("SelectedPartitions", "HNSWServedPartitions", "ExactScanPartitions"))
-        if not all(isinstance(v, int) and not isinstance(v, bool) for v in (selected, hnsw, exact)) or selected != probes or hnsw != selected or exact != 0 or hnsw + exact != selected:
+        selected, hnsw, exact = (
+            counters.get(name)
+            for name in ("SelectedPartitions", "HNSWServedPartitions", "ExactScanPartitions")
+        )
+        if (
+            not all(isinstance(value, int) and not isinstance(value, bool) for value in (selected, hnsw, exact))
+            or selected != probes
+            or hnsw != selected
+            or exact != 0
+            or hnsw + exact != selected
+        ):
             raise RuntimeError("TreeDB partition bridge route proof failed")
-        if any(not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in ids):
+        if any(
+            not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= _UINT64_MAX
+            for value in ids
+        ):
             raise RuntimeError("TreeDB partition bridge returned invalid compact IDs")
         if len(set(ids)) != len(ids) or any(
             not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value)

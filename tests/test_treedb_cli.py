@@ -1760,7 +1760,7 @@ def test_partition_config_serializes_bridge_fields_only_for_partition_mode() -> 
         base_url="http://127.0.0.1:7120",
         transport="partition_bridge_v1",
         partition_generation=7,
-        partition_node_config_sha256="node",
+        partition_node_config_sha256="a" * 64,
         partition_count=3,
     )
     assert config.to_dict()["transport"] == "partition_bridge_v1"
