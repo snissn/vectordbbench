@@ -504,7 +504,8 @@ class TreeDB(VectorDB):
 
     def _validate_config_shape(self) -> None:
         if self._transport() != "document_service":
-            raise ValueError(f"unsupported TreeDB transport {self._transport()!r}")
+            msg = f"unsupported TreeDB transport {self._transport()!r}"
+            raise ValueError(msg)
         self._validate_live_ann_timing()
         if self.query_embedding_encoding not in _QUERY_EMBEDDING_ENCODINGS:
             msg = f"TreeDB query_embedding_encoding={self.query_embedding_encoding!r} is not supported"
