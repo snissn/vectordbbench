@@ -230,6 +230,86 @@ def test_multiprocessing_runner_propagates_non_retryable_partition_error(monkeyp
             runner.search_by_dur(1, [[1.0]], Queue(), Condition())
 
 
+@pytest.mark.parametrize("method", ["_run_all_concurrencies_mem_efficient", "_run_by_dur"])
+@pytest.mark.parametrize("non_retryable", [True, False])
+def test_multiprocessing_sweep_later_failure_respects_retry_marker(monkeypatch, method, non_retryable) -> None:
+    class DB:
+        name = "TreeDB"
+
+        @staticmethod
+        def supports_payload_profile(_payload):
+            return True
+
+    class Queue:
+        @staticmethod
+        def qsize():
+            return 99
+
+    class Condition:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        @staticmethod
+        def notify_all():
+            pass
+
+    class Manager:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        @staticmethod
+        def Queue():
+            return Queue()
+
+        @staticmethod
+        def Condition():
+            return Condition()
+
+    state = {"concurrency": 0}
+
+    class Future:
+        def result(self):
+            if state["concurrency"] == 2:
+                error = PartitionSearchError("failed") if non_retryable else RuntimeError("failed")
+                raise error
+            return (1, 0, {"p99": 0.01, "p95": 0.01, "avg": 0.01, "count": 1}) if method == "_run_by_dur" else (1, 1, [0.01])
+
+    class Executor:
+        def __init__(self, *args, max_workers, **kwargs):
+            state["concurrency"] = max_workers
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        @staticmethod
+        def submit(*_args):
+            return Future()
+
+    runner = MultiProcessingSearchRunner(DB(), [[1.0]], concurrencies=[1, 2], duration=1)
+    monkeypatch.setattr("vectordb_bench.backend.runner.mp_runner.mp.Manager", Manager)
+    monkeypatch.setattr("vectordb_bench.backend.runner.mp_runner.concurrent.futures.ProcessPoolExecutor", Executor)
+    monkeypatch.setattr(runner, "get_mp_context", lambda: None)
+    monkeypatch.setattr(runner, "_wait_for_queue_fill", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runner, "stop", lambda: None)
+    ticks = iter(range(1, 20))
+    monkeypatch.setattr("vectordb_bench.backend.runner.mp_runner.time.perf_counter", lambda: next(ticks))
+    if non_retryable:
+        with pytest.raises(PartitionSearchError):
+            getattr(runner, method)(1) if method == "_run_by_dur" else getattr(runner, method)()
+    else:
+        result = getattr(runner, method)(1) if method == "_run_by_dur" else getattr(runner, method)()
+        assert result[0] > 0
+
+
 def test_partition_init_reuses_and_closes_only_bridge_connection(monkeypatch) -> None:
     db = bridge()
     db.transport = "partition_bridge_v1"
