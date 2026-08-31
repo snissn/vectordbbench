@@ -1,17 +1,17 @@
 import http.client
 import threading
+from contextlib import contextmanager
 from email.message import Message
 from types import SimpleNamespace
-from contextlib import contextmanager
 
 import pytest
 
 from vectordb_bench import config as bench_config
 from vectordb_bench.backend.clients.treedb.config import TreeDBConfig, TreeDBHNSWConfig
 from vectordb_bench.backend.clients.treedb.treedb import PartitionSearchError, TreeDB
-from vectordb_bench.backend.runner.serial_runner import SerialSearchRunner
 from vectordb_bench.backend.runner.cold_warm_runner import ColdWarmSearchRunner
 from vectordb_bench.backend.runner.mp_runner import MultiProcessingSearchRunner
+from vectordb_bench.backend.runner.serial_runner import SerialSearchRunner
 
 
 def bridge() -> TreeDB:
