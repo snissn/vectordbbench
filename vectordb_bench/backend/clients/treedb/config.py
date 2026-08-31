@@ -1,6 +1,6 @@
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from ..api import DBCaseConfig, DBConfig, IndexType, MetricType
 
@@ -22,6 +22,13 @@ class TreeDBConfig(DBConfig):
     partition_node_config_sha256: str = ""
     partition_count: int = 0
     _extra_empty_skip = frozenset({"partition_node_config_sha256"})
+
+    @field_validator("partition_generation", "partition_count", "timeout", mode="before")
+    @classmethod
+    def _reject_bool_numbers(cls, value: Any) -> Any:
+        if isinstance(value, bool):
+            raise TypeError("TreeDB numeric configuration cannot be boolean")
+        return value
 
     def to_dict(self) -> dict:
         result = {
@@ -67,6 +74,13 @@ class TreeDBHNSWConfig(BaseModel, DBCaseConfig):
     require_vector_index_guards: bool = True
     experimental: bool = False
     partition_probes: int = 0
+
+    @field_validator("ef_search", "partition_probes", mode="before")
+    @classmethod
+    def _reject_bool_numbers(cls, value: Any) -> Any:
+        if isinstance(value, bool):
+            raise TypeError("TreeDB numeric configuration cannot be boolean")
+        return value
 
     def index_param(self) -> dict:
         params: dict = {

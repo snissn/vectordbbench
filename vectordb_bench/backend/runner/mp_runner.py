@@ -109,6 +109,8 @@ class MultiProcessingSearchRunner:
                     count += 1
                     latencies.append(time.perf_counter() - s)
                 except Exception as e:
+                    if getattr(e, "non_retryable", False):
+                        raise
                     log.warning(f"VectorDB search_embedding error: {e}")
 
                 # loop through the test data
@@ -369,6 +371,8 @@ class MultiProcessingSearchRunner:
                     latency_us = int((time.perf_counter() - s) * US_TO_SECONDS)
                     histogram.record_value(min(latency_us, HDR_HISTOGRAM_MAX_US))
                 except Exception as e:
+                    if getattr(e, "non_retryable", False):
+                        raise
                     failed_cnt += 1
                     # reduce log
                     if failed_cnt <= 3:

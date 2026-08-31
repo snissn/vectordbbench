@@ -2,13 +2,16 @@ import http.client
 import threading
 from email.message import Message
 from types import SimpleNamespace
+from contextlib import contextmanager
 
 import pytest
 
 from vectordb_bench import config as bench_config
-from vectordb_bench.backend.clients.treedb.config import TreeDBHNSWConfig
+from vectordb_bench.backend.clients.treedb.config import TreeDBConfig, TreeDBHNSWConfig
 from vectordb_bench.backend.clients.treedb.treedb import PartitionSearchError, TreeDB
 from vectordb_bench.backend.runner.serial_runner import SerialSearchRunner
+from vectordb_bench.backend.runner.cold_warm_runner import ColdWarmSearchRunner
+from vectordb_bench.backend.runner.mp_runner import MultiProcessingSearchRunner
 
 
 def bridge() -> TreeDB:
@@ -148,6 +151,83 @@ def test_serial_runner_keeps_retrying_ordinary_errors(monkeypatch) -> None:
     runner = SerialSearchRunner(db=db, test_data=[[1.0]], ground_truth=[[1]], k=1)
     assert runner._get_db_search_res([1.0]) == [1]
     assert db.calls == 2
+
+
+@pytest.mark.parametrize(
+    ("config", "kwargs"),
+    [
+        (TreeDBConfig, {"partition_generation": True}),
+        (TreeDBConfig, {"partition_count": True}),
+        (TreeDBConfig, {"timeout": True}),
+        (TreeDBHNSWConfig, {"partition_probes": True}),
+        (TreeDBHNSWConfig, {"ef_search": True}),
+    ],
+)
+def test_treedb_config_rejects_raw_boolean_numbers(config, kwargs) -> None:
+    base = {"base_url": "http://127.0.0.1:7120"} if config is TreeDBConfig else {}
+    with pytest.raises((TypeError, ValueError), match="cannot be boolean"):
+        config(**base, **kwargs)
+
+
+def test_cold_warm_runner_does_not_retry_non_retryable_partition_error(monkeypatch) -> None:
+    class DB:
+        name = "TreeDB"
+
+        @staticmethod
+        def supports_payload_profile(_payload):
+            return True
+
+        def search_embedding(self, *_args):
+            raise PartitionSearchError("partition failed")
+
+    runner = ColdWarmSearchRunner(DB(), [[1.0]], k=1, query_count=1)
+    monkeypatch.setattr(bench_config, "MAX_SEARCH_RETRY", 3)
+    with pytest.raises(PartitionSearchError):
+        runner._get_db_search_res([1.0])
+
+
+@pytest.mark.parametrize("method", ["search", "search_by_dur"])
+def test_multiprocessing_runner_propagates_non_retryable_partition_error(monkeypatch, method) -> None:
+    class DB:
+        name = "TreeDB"
+
+        @staticmethod
+        def supports_payload_profile(_payload):
+            return True
+
+        @contextmanager
+        def init(self):
+            yield
+
+        def prepare_filter(self, _filters):
+            pass
+
+        def search_embedding(self, *_args):
+            raise PartitionSearchError("partition failed")
+
+    class Queue:
+        @staticmethod
+        def put(_value):
+            pass
+
+    class Condition:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        @staticmethod
+        def wait():
+            pass
+
+    runner = MultiProcessingSearchRunner(DB(), [[1.0]], k=1, duration=1)
+    monkeypatch.setattr("vectordb_bench.backend.runner.mp_runner.time.perf_counter", lambda: 0.0)
+    with pytest.raises(PartitionSearchError):
+        if method == "search":
+            runner.search([[1.0]], Queue(), Condition())
+        else:
+            runner.search_by_dur(1, [[1.0]], Queue(), Condition())
 
 
 def test_partition_init_reuses_and_closes_only_bridge_connection(monkeypatch) -> None:
