@@ -6,6 +6,7 @@ from enum import Enum, StrEnum
 from typing import Any, ClassVar, Self
 
 import ujson
+from pydantic import field_validator
 
 from vectordb_bench.backend.cases import type2case
 from vectordb_bench.backend.dataset import DatasetWithSizeMap
@@ -193,6 +194,13 @@ class CaseConfig(BaseModel):
     custom_case: dict | None = None
     k: int | None = config.K_DEFAULT
     concurrency_search_config: ConcurrencySearchConfig = ConcurrencySearchConfig()
+
+    @field_validator("k", mode="before")
+    @classmethod
+    def _reject_bool_k(cls, value: Any) -> Any:
+        if isinstance(value, bool):
+            raise TypeError("CaseConfig.k cannot be boolean")
+        return value
 
     '''
     @property

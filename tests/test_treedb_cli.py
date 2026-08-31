@@ -1743,6 +1743,35 @@ def test_treedb_named_configs_have_expected_modes() -> None:
     assert scalar.search_param()["quantized_rerank_candidates"] == 32
 
 
+def test_partition_bridge_options_are_limited_to_general_hnsw_command() -> None:
+    runner = CliRunner()
+    general = runner.invoke(treedb_cli.TreeDBHNSW, ["--help"])
+    named = runner.invoke(treedb_cli.TreeDBColumnGraphExact, ["--help"])
+    assert general.exit_code == named.exit_code == 0
+    assert "--transport" in general.output
+    assert "--partition-count" in general.output
+    assert "--transport" not in named.output
+    assert "--partition-count" not in named.output
+
+
+def test_partition_config_serializes_bridge_fields_only_for_partition_mode() -> None:
+    config = TreeDBConfig(
+        db_label="local",
+        base_url="http://127.0.0.1:7120",
+        transport="partition_bridge_v1",
+        partition_generation=7,
+        partition_node_config_sha256="a" * 64,
+        partition_count=3,
+    )
+    assert config.to_dict()["transport"] == "partition_bridge_v1"
+    assert config.to_dict()["partition_count"] == 3
+
+
+def test_treedb_config_rejects_unknown_transport() -> None:
+    with pytest.raises(ValueError, match="transport"):
+        TreeDBConfig(db_label="local", base_url="http://127.0.0.1:7120", transport="unknown")
+
+
 @pytest.mark.parametrize(
     ("timeout", "interval", "message"),
     [(0, 0, "visibility_timeout"), (1, -0.1, "poll_interval")],

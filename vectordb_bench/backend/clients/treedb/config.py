@@ -1,4 +1,6 @@
-from pydantic import BaseModel
+from typing import Any, Literal
+
+from pydantic import BaseModel, field_validator
 
 from ..api import DBCaseConfig, DBConfig, IndexType, MetricType
 
@@ -15,9 +17,21 @@ class TreeDBConfig(DBConfig):
     response_format: str = "full"
     live_ann_visibility_timeout: float = 5.0
     live_ann_visibility_poll_interval: float = 0.05
+    transport: Literal["document_service", "partition_bridge_v1"] = "document_service"
+    partition_generation: int = 0
+    partition_node_config_sha256: str = ""
+    partition_count: int = 0
+    _extra_empty_skip = frozenset({"partition_node_config_sha256"})
+
+    @field_validator("partition_generation", "partition_count", "timeout", mode="before")
+    @classmethod
+    def _reject_bool_numbers(cls, value: Any) -> Any:
+        if isinstance(value, bool):
+            raise TypeError("TreeDB numeric configuration cannot be boolean")
+        return value
 
     def to_dict(self) -> dict:
-        return {
+        result = {
             "base_url": self.base_url,
             "index_name": self.index_name,
             "timeout": self.timeout,
@@ -28,6 +42,14 @@ class TreeDBConfig(DBConfig):
             "live_ann_visibility_timeout": self.live_ann_visibility_timeout,
             "live_ann_visibility_poll_interval": self.live_ann_visibility_poll_interval,
         }
+        if self.transport == "partition_bridge_v1":
+            result.update(
+                transport=self.transport,
+                partition_generation=self.partition_generation,
+                partition_node_config_sha256=self.partition_node_config_sha256,
+                partition_count=self.partition_count,
+            )
+        return result
 
 
 class TreeDBHNSWConfig(BaseModel, DBCaseConfig):
@@ -51,6 +73,14 @@ class TreeDBHNSWConfig(BaseModel, DBCaseConfig):
     quantized_rerank_candidates: int = 0
     require_vector_index_guards: bool = True
     experimental: bool = False
+    partition_probes: int = 0
+
+    @field_validator("ef_search", "partition_probes", mode="before")
+    @classmethod
+    def _reject_bool_numbers(cls, value: Any) -> Any:
+        if isinstance(value, bool):
+            raise TypeError("TreeDB numeric configuration cannot be boolean")
+        return value
 
     def index_param(self) -> dict:
         params: dict = {
@@ -78,6 +108,7 @@ class TreeDBHNSWConfig(BaseModel, DBCaseConfig):
             "quantized_rerank_candidates": self.quantized_rerank_candidates,
             "require_vector_index_guards": self.require_vector_index_guards,
             "experimental": self.experimental,
+            "partition_probes": self.partition_probes,
         }
 
 

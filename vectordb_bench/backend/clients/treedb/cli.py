@@ -1,4 +1,4 @@
-from typing import Annotated, Unpack
+from typing import Annotated, Any, Unpack
 
 import click
 
@@ -114,6 +114,19 @@ class TreeDBBaseTypedDict(CommonTypedDict):
 
 
 class TreeDBTypedDict(TreeDBBaseTypedDict):
+    transport: Annotated[
+        str,
+        click.option(
+            "--transport",
+            type=click.Choice(["document_service", "partition_bridge_v1"]),
+            default="document_service",
+            show_default=True,
+        ),
+    ]
+    partition_generation: Annotated[int, click.option("--partition-generation", type=int, default=0)]
+    partition_node_config_sha256: Annotated[str, click.option("--partition-node-config-sha256", type=str, default="")]
+    partition_count: Annotated[int, click.option("--partition-count", type=int, default=0)]
+    partition_probes: Annotated[int, click.option("--partition-probes", type=int, default=0)]
     use_vector_index: Annotated[
         bool,
         click.option(
@@ -225,7 +238,7 @@ class TreeDBScalarU8RerankHNSWTypedDict(TreeDBScalarU8RerankTypedDict, HNSWFlavo
 class TreeDBRaBitQ1BitExperimentalHNSWTypedDict(TreeDBRaBitQ1BitExperimentalTypedDict, HNSWFlavor3): ...
 
 
-def _treedb_config(parameters):
+def _treedb_config(parameters: dict[str, Any]):
     from .config import TreeDBConfig
 
     return TreeDBConfig(
@@ -239,10 +252,14 @@ def _treedb_config(parameters):
         response_format=parameters["response_format"],
         live_ann_visibility_timeout=parameters["live_ann_visibility_timeout"],
         live_ann_visibility_poll_interval=parameters["live_ann_visibility_poll_interval"],
+        transport=parameters.get("transport", "document_service"),
+        partition_generation=parameters.get("partition_generation", 0),
+        partition_node_config_sha256=parameters.get("partition_node_config_sha256", ""),
+        partition_count=parameters.get("partition_count", 0),
     )
 
 
-def _run_treedb(parameters, db_case_config):
+def _run_treedb(parameters: dict[str, Any], db_case_config: Any):
     run(DB.TreeDB, _treedb_config(parameters), db_case_config, **parameters)
 
 
@@ -267,6 +284,7 @@ def TreeDBHNSW(**parameters: Unpack[TreeDBHNSWTypedDict]):
             quantized_index_name=parameters["quantized_index_name"],
             quantized_rerank_candidates=parameters["quantized_rerank_candidates"],
             require_vector_index_guards=parameters["require_vector_index_guards"],
+            partition_probes=parameters["partition_probes"],
         ),
     )
 

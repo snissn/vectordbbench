@@ -109,6 +109,8 @@ class MultiProcessingSearchRunner:
                     count += 1
                     latencies.append(time.perf_counter() - s)
                 except Exception as e:
+                    if getattr(e, "non_retryable", False):
+                        raise
                     log.warning(f"VectorDB search_embedding error: {e}")
 
                 # loop through the test data
@@ -178,6 +180,8 @@ class MultiProcessingSearchRunner:
                     max_qps = qps
                     log.info(f"Update largest qps with concurrency {conc}: current max_qps={max_qps}")
         except Exception as e:
+            if getattr(e, "non_retryable", False):
+                raise
             log.warning(
                 f"Fail to search, concurrencies: {self.concurrencies}, max_qps before failure={max_qps}, reason={e}"
             )
@@ -315,6 +319,8 @@ class MultiProcessingSearchRunner:
                     max_qps = qps
                     log.info(f"Update largest qps with concurrency {conc}: current max_qps={max_qps}")
         except Exception as e:
+            if getattr(e, "non_retryable", False):
+                raise
             log.warning(
                 f"Fail to search all concurrencies: {self.concurrencies}, max_qps before failure={max_qps}, reason={e}",
             )
@@ -369,6 +375,8 @@ class MultiProcessingSearchRunner:
                     latency_us = int((time.perf_counter() - s) * US_TO_SECONDS)
                     histogram.record_value(min(latency_us, HDR_HISTOGRAM_MAX_US))
                 except Exception as e:
+                    if getattr(e, "non_retryable", False):
+                        raise
                     failed_cnt += 1
                     # reduce log
                     if failed_cnt <= 3:

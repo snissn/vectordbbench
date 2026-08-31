@@ -51,6 +51,8 @@ class ColdWarmSearchRunner:
         try:
             results = self._search_embedding(emb)
         except Exception as e:
+            if getattr(e, "non_retryable", False):
+                raise
             log.warning(f"Cold/warm search failed, retry_idx={retry_idx}, Exception: {e}")
             if retry_idx < config.MAX_SEARCH_RETRY:
                 return self._get_db_search_res(emb=emb, retry_idx=retry_idx + 1)

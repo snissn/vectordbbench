@@ -16,6 +16,17 @@ from vectordb_bench import config
 log = logging.getLogger("vectordb_bench")
 
 
+@pytest.mark.parametrize("value", [True, False])
+def test_case_config_rejects_boolean_k(value):
+    with pytest.raises(TypeError, match="cannot be boolean"):
+        CaseConfig(case_id=CaseType.Performance1024D1M, k=value)
+
+
+@pytest.mark.parametrize("value", [None, 10, "10"])
+def test_case_config_accepts_nonboolean_k(value):
+    assert CaseConfig(case_id=CaseType.Performance1024D1M, k=value).k == (None if value is None else 10)
+
+
 class TestModels:
     @pytest.mark.skip("runs locally")
     def test_test_result(self):
