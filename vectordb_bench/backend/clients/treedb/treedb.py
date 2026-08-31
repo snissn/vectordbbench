@@ -44,6 +44,10 @@ _PARTITION_NODE_CONFIG_SHA256 = re.compile(r"[0-9a-f]{64}")
 _UINT64_MAX = (1 << 64) - 1
 
 
+class PartitionSearchError(RuntimeError):
+    non_retryable = True
+
+
 def _jsonable_response(response: Any) -> Any:
     if is_dataclass(response):
         return _jsonable_response(asdict(response))
@@ -441,7 +445,10 @@ class TreeDB(VectorDB):
 
     def search_embedding(self, query: list[float], k: int = 100, **kwargs: Any) -> list[int]:
         if self._transport() == "partition_bridge_v1":
-            return self._partition_search(query, k)
+            try:
+                return self._partition_search(query, k)
+            except Exception as exc:
+                raise PartitionSearchError("TreeDB partition bridge search failed") from exc
         if self._search_param.get("use_vector_index"):
             result = self._search_vector_index(query, k)
             if self._search_param.get("require_vector_index_guards", True):

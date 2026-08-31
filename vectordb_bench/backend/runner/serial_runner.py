@@ -169,6 +169,8 @@ class SerialSearchRunner:
         try:
             results = self._search_embedding(emb, tenant=tenant)
         except Exception as e:
+            if getattr(e, "non_retryable", False):
+                raise
             log.warning(f"Serial search failed, retry_idx={retry_idx}, Exception: {e}")
             if retry_idx < config.MAX_SEARCH_RETRY:
                 return self._get_db_search_res(emb=emb, tenant=tenant, retry_idx=retry_idx + 1)

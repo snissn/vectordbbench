@@ -5,8 +5,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from vectordb_bench import config as bench_config
 from vectordb_bench.backend.clients.treedb.config import TreeDBHNSWConfig
-from vectordb_bench.backend.clients.treedb.treedb import TreeDB
+from vectordb_bench.backend.clients.treedb.treedb import PartitionSearchError, TreeDB
+from vectordb_bench.backend.runner.serial_runner import SerialSearchRunner
 
 
 def bridge() -> TreeDB:
@@ -105,6 +107,47 @@ def test_partition_search_has_no_status_request(monkeypatch) -> None:
     monkeypatch.setattr(db, "_partition_request", request)
     db._partition_search([1.0], 1)
     assert calls == ["/v1/search"]
+
+
+def test_serial_runner_does_not_replay_public_partition_search(monkeypatch) -> None:
+    db = object.__new__(TreeDB)
+    db.name, db.transport = "TreeDB", "partition_bridge_v1"
+    calls = []
+
+    def failed_partition_search(*_args):
+        calls.append(1)
+        raise RuntimeError("failed")
+
+    monkeypatch.setattr(db, "_partition_search", failed_partition_search)
+    monkeypatch.setattr(bench_config, "MAX_SEARCH_RETRY", 3)
+    runner = SerialSearchRunner(db=db, test_data=[[1.0]], ground_truth=[[1]], k=1)
+    with pytest.raises(PartitionSearchError):
+        runner._get_db_search_res([1.0])
+    assert calls == [1]
+
+
+def test_serial_runner_keeps_retrying_ordinary_errors(monkeypatch) -> None:
+    class RetryableDB:
+        name = "retryable"
+
+        @staticmethod
+        def supports_payload_profile(_payload):
+            return True
+
+        def __init__(self):
+            self.calls = 0
+
+        def search_embedding(self, *_args):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("retry")
+            return [1]
+
+    db = RetryableDB()
+    monkeypatch.setattr(bench_config, "MAX_SEARCH_RETRY", 1)
+    runner = SerialSearchRunner(db=db, test_data=[[1.0]], ground_truth=[[1]], k=1)
+    assert runner._get_db_search_res([1.0]) == [1]
+    assert db.calls == 2
 
 
 def test_partition_init_reuses_and_closes_only_bridge_connection(monkeypatch) -> None:
