@@ -16,6 +16,7 @@ def bridge() -> TreeDB:
     db.partition_count = 3
     db.document_embedding_encoding = db.query_embedding_encoding = "json"
     db.stats_mode, db.response_format = "full_diagnostics", "full"
+    db.live_ann_visibility_timeout, db.live_ann_visibility_poll_interval = 5.0, 0.05
     db.db_case_config = SimpleNamespace(strategy="column_graph")
     db._search_param = {
         "partition_probes": 2,
@@ -176,10 +177,13 @@ def test_partition_config_rejects_probe_count_at_or_above_count() -> None:
         ({"document_embedding_encoding": "f32_le_b64"}, {}),
         ({"stats_mode": "production"}, {}),
         ({"response_format": "ids"}, {}),
+        ({"live_ann_visibility_timeout": 4.0}, {}),
+        ({"live_ann_visibility_poll_interval": 0.1}, {}),
         ({}, {"use_vector_index": True}),
         ({}, {"query_mode": "quantized_only"}),
         ({}, {"quantized_index_name": "quantized"}),
         ({}, {"quantized_rerank_candidates": 1}),
+        ({}, {"quantized_codec": "scalar_u8"}),
         ({}, {"experimental": True}),
         ({}, {"require_vector_index_guards": False}),
         ({}, {"strategy": "native_runtime"}),

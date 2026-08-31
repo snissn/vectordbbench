@@ -586,6 +586,11 @@ class TreeDB(VectorDB):
         }
         if any(getattr(self, name) != value for name, value in canonical.items()):
             raise ValueError("TreeDB partition_bridge_v1 rejects document-service encoding and response options")
+        if (
+            self.live_ann_visibility_timeout != 5.0
+            or self.live_ann_visibility_poll_interval != 0.05
+        ):
+            raise ValueError("TreeDB partition_bridge_v1 rejects live-ANN timing options")
         search = self._search_param
         if (
             search.get("use_vector_index") is not False
@@ -594,6 +599,7 @@ class TreeDB(VectorDB):
             or search.get("quantized_rerank_candidates") != 0
             or search.get("experimental") is not False
             or search.get("require_vector_index_guards") is not True
+            or getattr(self.db_case_config, "quantized_codec", None) != ""
             or getattr(self.db_case_config, "strategy", None) != "column_graph"
         ):
             raise ValueError("TreeDB partition_bridge_v1 rejects noncanonical document-service search options")
