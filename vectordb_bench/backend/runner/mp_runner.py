@@ -180,6 +180,8 @@ class MultiProcessingSearchRunner:
                     max_qps = qps
                     log.info(f"Update largest qps with concurrency {conc}: current max_qps={max_qps}")
         except Exception as e:
+            if getattr(e, "non_retryable", False):
+                raise
             log.warning(
                 f"Fail to search, concurrencies: {self.concurrencies}, max_qps before failure={max_qps}, reason={e}"
             )
@@ -317,6 +319,8 @@ class MultiProcessingSearchRunner:
                     max_qps = qps
                     log.info(f"Update largest qps with concurrency {conc}: current max_qps={max_qps}")
         except Exception as e:
+            if getattr(e, "non_retryable", False):
+                raise
             log.warning(
                 f"Fail to search all concurrencies: {self.concurrencies}, max_qps before failure={max_qps}, reason={e}",
             )
